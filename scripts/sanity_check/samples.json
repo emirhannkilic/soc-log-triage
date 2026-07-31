@@ -1,0 +1,10 @@
+[
+  {"_time": "07/07/2025T06:00:00", "ipaddress": "127.0.0.1", "hostname": "localhost", "manager": "local manager", "platform": "local platform", "isletimSistemi": "Windows", "cihazKategorisi": "local test"},
+  {"_time": "07/07/2025T09:14:32", "ipaddress": "192.168.1.42", "hostname": "FIN-WKS-014", "manager": "jane.doe@company.com", "platform": "Splunk", "isletimSistemi": "Windows 11", "cihazKategorisi": "corporate workstation"},
+  {"_time": "07/07/2025T02:47:18", "ipaddress": "185.220.101.7", "hostname": "unknown-host", "manager": "n/a", "platform": "EDR", "isletimSistemi": "Linux", "cihazKategorisi": "external relay"},
+  {"_time": "07/08/2025T14:03:55", "ipaddress": "10.0.5.201", "hostname": "HR-LAPTOP-22", "manager": "mert.yilmaz@company.com", "platform": "CrowdStrike", "isletimSistemi": "macOS 15", "cihazKategorisi": "corporate laptop"},
+  {"_time": "07/08/2025T23:59:01", "ipaddress": "45.155.205.233", "hostname": "mail-relay-03", "manager": "n/a", "platform": "mail gateway", "isletimSistemi": "unknown", "cihazKategorisi": "external mail server"},
+  {"_time": "07/09/2025T08:30:00", "ipaddress": "172.16.4.10", "hostname": "IT-ADMIN-01", "manager": "admin@company.com", "platform": "Active Directory", "isletimSistemi": "Windows Server 2022", "cihazKategorisi": "domain controller"},
+  {"_time": "07/09/2025T11:22:47", "ipaddress": "91.219.212.88", "hostname": "kali-attacker", "manager": "n/a", "platform": "firewall log", "isletimSistemi": "Kali Linux", "cihazKategorisi": "suspicious external host"},
+  {"_time": "07/09/2025T16:45:10", "ipaddress": "192.168.1.77", "hostname": "SALES-WKS-009", "manager": "ayse.kaya@company.com", "platform": "Splunk", "isletimSistemi": "Windows 10", "cihazKategorisi": "corporate workstation"}
+]
