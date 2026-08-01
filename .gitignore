@@ -5,6 +5,7 @@ scripts/sanity_check/results.txt
 scripts/sanity_check/errors.log
 __pycache__/
 *.pyc
+.claude/
 
 
 # claude
@@ -13,3 +14,6 @@ PROGRESS.md
 
 # plan
 seneca-phishing-adapter-final-plan.md
+
+# internal architecture notes, not for GitHub
+llm-proxy-notes.md
