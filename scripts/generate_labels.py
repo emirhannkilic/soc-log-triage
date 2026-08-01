@@ -1,19 +1,25 @@
 """
 Self-labeling: samples N examples each from data/processed/phishing.jsonl and
-legitimate.jsonl, runs them through Seneca (GGUF, via llama-simple) with Cihan
-abi's exact phishing system prompt, and writes the resulting HTML reports as
+legitimate.jsonl, runs them through Seneca (GGUF, via llama-simple) with the
+exact target phishing system prompt, and writes the resulting HTML reports as
 LoRA training data ({"messages": [system, user, assistant]}) to
 data/processed/training_data.jsonl.
 
 This is a proof-of-concept labeling strategy, not a production one — Seneca
 labels its own training data (no stronger teacher model), so it can reinforce
-its own mistakes. See CLAUDE.md "Cihan Abi Sistem Promptu" for the tradeoff
+its own mistakes. See CLAUDE.md "System Prompt" for the tradeoff
 rationale (demo/PoC scope, no external API cost/latency, data stays local).
 
 Runs a llama-simple subprocess per example, so this is slow (~60-90s per
 example on CPU) — meant for small sample sizes (hundreds, not thousands).
+
+Resumable: each line written includes a stable sample_id (hash of sender +
+subject + headers). On restart, already-labeled samples are skipped and new
+output is appended, so an interrupted run (Ctrl+C, crash, closed terminal)
+can be safely re-run with the same command instead of starting over.
 """
 import argparse
+import hashlib
 import json
 import random
 import subprocess
@@ -52,6 +58,32 @@ MAX_TOKENS = 700
 def load_jsonl(path: Path) -> list[dict]:
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def sample_id(sample: dict) -> str:
+    # Stable identity for a sample, independent of dict ordering — used to
+    # detect already-labeled examples on resume.
+    key = f"{sample.get('sender', '')}\x00{sample.get('subject', '')}\x00{sample.get('headers', '')}"
+    return hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()
+
+
+def load_completed_ids(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    completed = set()
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            sid = record.get("sample_id")
+            if sid:
+                completed.add(sid)
+    return completed
 
 
 def build_prompt(sample: dict) -> str:
@@ -113,12 +145,22 @@ def main() -> None:
     random.shuffle(combined)
 
     out_path = PROCESSED_DIR / "training_data.jsonl"
+    completed_ids = load_completed_ids(out_path)
+    if completed_ids:
+        print(f"Resuming: {len(completed_ids)} samples already labeled in {out_path}, skipping those.")
+
     total = len(combined)
     written = 0
+    skipped = 0
     failed = 0
 
-    with open(out_path, "w") as out_f:
+    with open(out_path, "a") as out_f:
         for i, (sample, source_label) in enumerate(combined, start=1):
+            sid = sample_id(sample)
+            if sid in completed_ids:
+                skipped += 1
+                continue
+
             prompt = build_prompt(sample)
             print(f"[{i}/{total}] source={source_label} sender={sample.get('sender', '')[:60]!r} ...", flush=True)
 
@@ -129,6 +171,7 @@ def main() -> None:
                 continue
 
             record = {
+                "sample_id": sid,
                 "messages": [
                     {"role": "system", "content": f"{SYSTEM_PROMPT}\nHeader Bilgisi: {sample['headers']}"},
                     {"role": "user", "content": sample["body"][:MAX_BODY_CHARS]},
@@ -141,7 +184,7 @@ def main() -> None:
             written += 1
             print(f"  OK ({len(output)} chars)")
 
-    print(f"\nDone. {written} written, {failed} failed. Output: {out_path}")
+    print(f"\nDone. {written} written, {skipped} skipped (already done), {failed} failed. Output: {out_path}")
 
 
 if __name__ == "__main__":

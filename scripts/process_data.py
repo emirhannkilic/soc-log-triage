@@ -5,10 +5,10 @@ stays limited to real person-to-person correspondence, balances Enron down to
 roughly the phishing_pot volume, and writes two JSONL files
 (phishing.jsonl, legitimate.jsonl) under data/processed/.
 
-Raw headers are KEPT (not stripped) — Cihan abi's system prompt requires
+Raw headers are KEPT (not stripped) — the target system prompt requires
 SPF/DKIM/DMARC and Received-chain analysis, so the header block is part of
-the model input. See CLAUDE.md "Cihan Abi Sistem Promptu" for why this
-overturned the earlier header-normalize decision.
+the model input. See CLAUDE.md "System Prompt" for why this overturned the
+earlier header-normalize decision.
 
 See CLAUDE.md for why the Enron sender/recipient filter exists.
 """
@@ -76,21 +76,35 @@ def get_body_raw(msg: email.message.EmailMessage) -> tuple[str, bool]:
     return content, is_html
 
 
-def get_header_block(msg: email.message.EmailMessage) -> str:
-    return "\n".join(f"{key}: {value}" for key, value in msg.items())
+def get_header_block(raw_msg: email.message.Message) -> str:
+    # raw_msg is parsed with Compat32 (no strict address/date parsing), so
+    # malformed headers (common in phishing samples) don't raise.
+    return "\n".join(f"{key}: {value}" for key, value in raw_msg.items())
 
 
 def parse_eml_file(path: Path) -> dict | None:
     try:
         with open(path, "rb") as f:
-            msg = email.message_from_binary_file(f, policy=policy.default)
+            raw_bytes = f.read()
+        # Compat32 (default parser) reads headers as plain strings without
+        # the strict address-object parsing that policy.default does, which
+        # crashes on malformed From/To headers (frequent in phishing samples,
+        # e.g. group-syntax addresses that trip email.headerregistry).
+        raw_msg = email.message_from_bytes(raw_bytes)
+        # policy.default is still used for the body, since MIME/multipart
+        # handling (get_body) is what we actually need from it.
+        msg = email.message_from_bytes(raw_bytes, policy=policy.default)
     except Exception:
         return None
 
-    sender = str(msg.get("From", "")).strip()
-    subject = str(msg.get("Subject", "")).strip()
-    headers = get_header_block(msg)
-    raw_body, is_html = get_body_raw(msg)
+    sender = str(raw_msg.get("From", "")).strip()
+    subject = str(raw_msg.get("Subject", "")).strip()
+    headers = get_header_block(raw_msg)
+
+    try:
+        raw_body, is_html = get_body_raw(msg)
+    except Exception:
+        raw_body, is_html = "", False
 
     urls = extract_urls(raw_body)
     body = html_to_text(raw_body) if is_html else raw_body.strip()
