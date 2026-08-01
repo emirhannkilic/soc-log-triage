@@ -1,3 +1,7 @@
 huggingface_hub
 mlx-lm
 mlx-vlm
+pydantic
+beautifulsoup4
+pyyaml
+jinja2
