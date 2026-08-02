@@ -54,8 +54,8 @@ def main() -> None:
 
     alias_map.save()
     print(f"\nWrote {written} records to {out_path} ({failed} failed)")
-    print(f"Alias map: {len(alias_map.domains)} domains, {len(alias_map.emails)} emails, "
-          f"{len(alias_map.filenames)} filenames, {len(alias_map.ips)} IPs -> {MAP_PATH}")
+    print(f"Alias map: {len(alias_map.filenames)} filenames, "
+          f"{len(alias_map.names)} names -> {MAP_PATH}")
 
 
 if __name__ == "__main__":

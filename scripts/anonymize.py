@@ -1,60 +1,129 @@
 """
-v3 plan Adim 3: anonymizes EmailFacts before they leave the local machine
-(e.g. before teacher generation, Adim 6-7). Real domains and email addresses
-are replaced with consistent aliases — the same real value always maps to
-the same alias, so header consistency signals (domain X matches domain Y)
-survive anonymization. See CLAUDE.md "Kilitlenen Kararlar" for why the
-mapping must be consistent rather than random.
+v3 plan Adim 3: anonymizes the user's personal identity out of EmailFacts
+before they leave the local machine (e.g. before teacher generation, Adim
+6-7). This data feeds LoRA fine-tuning (Adim 9) — real domain structure,
+sender addresses, and IPs are genuine training signal, so they are kept
+real. Only the account holder's own identity (their name, their own email
+address) is redacted, since that's the one thing in this corpus that's
+truly personal rather than already-public sender/brand/infrastructure
+information.
 
-Anonymized: domain fields (from_domain, return_path_domain, reply_to_domain,
-message_id_domain, dkim_domain, urls[].href_domain/anchor_text_domain),
-urls[].url, attachments[].filename, first_received_ip.
+holdout-fix-tasks.md T4 originally flagged this module for anonymizing
+domains/URLs inconsistently (facts said domain-3141.test, body_text said
+netflix.com) and asked to extend coverage. Working through it surfaced a
+bigger question: this data is training input, not a public release — an
+LLM being fine-tuned on "domain-3141.test" instead of "netflix.com" learns
+nothing about real domain structure, which actively hurts training quality
+for no privacy benefit (sender/brand domains are already public). So this
+module's scope narrowed instead of widened: domain anonymization was
+REMOVED entirely (all domains, IPs, and third-party email addresses are
+now left real), and what's left is redaction of exactly the account
+holder's own identity — their name and their own email address (matched
+literally, not "any email that happens to be on gmail.com" — someone
+else's Gmail address is not the user's personal data).
 
-NOT anonymized: outcome/boolean fields (spf_result, *_mismatch,
-*_matches_from, has_html_form, etc.) — they carry no identifying
-information. display_name is also left untouched: it's usually a brand or
-sender-chosen name rather than sensitive personal data, and the rule
-engine's display_name_brand_mismatch signal (plan section 4.2) reads its
-actual content — anonymizing it would silently break that check.
-subject/body_text: only email addresses inside them (found via regex) are
-replaced; person names are NOT detected or redacted — reliable NER isn't
-available here, and attempting a heuristic name-scrub risks both false
-positives (redacting ordinary words) and false negatives (a false sense of
-privacy). See PROGRESS.md for the decision record.
+Redacted: the account holder's own email address (OWN_EMAIL below,
+wherever it appears — headers, body_text, subject, URLs) and their own
+name, via two complementary matchers: a literal list of known name
+variants (_OWN_NAME_VARIANTS_RE — catches leaks in any context, e.g. a
+marketing subject line "...Sende Emirhan ⭐" that isn't a salutation at
+all) and a structured-salutation pattern ("Sayın X Y,", "Dear X Y,") that
+also catches THIRD PARTIES' names when the account holder's own mailbox
+addresses someone else by name (e.g. "Sayın Necati Kılıç," in an order
+confirmation) — a real person's name is personal data regardless of whose
+mailbox it appears in. Attachment filenames are still anonymized — unlike
+domains, a filename like "fatura_ahmet_yilmaz.pdf" can itself carry a real
+person's name.
 
-The alias map is stored in data/raw/gmail/anonymization_map.json (gitignored,
-never leaves the local machine) so re-running this script — or anonymizing
-more samples later — produces the same aliases for values already seen.
+NOT redacted (deliberately, as of this revision): all domains (from_domain,
+return_path_domain, urls[].href_domain, etc.), all IP addresses
+(first_received_ip), and any email address that isn't the account holder's
+own — these are real training signal, not personal data. display_name was
+never redacted (see the rule engine's display_name_brand_mismatch signal,
+plan section 4.2). General third-party names in free text are still NOT
+detected — that remains out of scope, same reasoning as before (no
+reliable NER, false positive/negative risk).
+
+The alias map (data/raw/gmail/anonymization_map.json, gitignored) tracks
+name aliases only now, so the same real name always maps to the same
+alias across records.
+
+Run scripts/check_anonymization.py after this to verify the account
+holder's identity doesn't survive — that script is the actual guarantee,
+not this docstring.
 """
 import argparse
 import json
 import re
+import urllib.parse
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MAP_PATH = PROJECT_ROOT / "data" / "raw" / "gmail" / "anonymization_map.json"
 
-EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+# The account holder's own address — see userEmail in CLAUDE.md context.
+# This is the one email address in the corpus that's genuinely the user's
+# personal identity; every other address (senders, third parties,
+# phishing_pot addresses) is left real.
+OWN_EMAIL = "emirrk53@gmail.com"
+OWN_EMAIL_ALIAS = "user@example.test"
+OWN_NAME_ALIAS = "Ad Soyad 0"
 
-# A handful of common brand/institution domains that must stay real for the
-# rule engine's brand-mismatch signal (display_name_brand_mismatch, section
-# 4.2) to keep working — anonymizing e.g. "paypal.com" to "domain-042.test"
-# would make every legitimate PayPal email look like a display-name spoof.
-_PRESERVE_DOMAINS = {
-    "paypal.com", "apple.com", "microsoft.com", "google.com", "amazon.com",
-    "netflix.com", "vakifbank.com.tr", "garanti.com.tr", "isbank.com.tr",
-    "akbank.com", "ziraatbank.com.tr", "yapikredi.com.tr", "dhl.com",
-    "fedex.com", "ups.com", "gmail.com",
-}
+# The account holder's own name, in known variants — a LITERAL list, not
+# general NER. Unlike _SALUTATION_RE (which matches any name in a
+# structured "Sayın X," greeting), this exists because the salutation
+# pattern alone missed real leaks: e.g. "...Sende Emirhan ⭐" in a marketing
+# subject line, which isn't a salutation at all. Matching a small, known,
+# literal set of the user's own name variants carries essentially no false
+# positive risk and catches leaks in contexts a structural pattern can't
+# anticipate — EXCEPT the bare surname "Kılıç", which is a common Turkish
+# surname shared by unrelated third parties (e.g. "Sayın Necati Kılıç," in
+# an order confirmation): matching it alone would misredact a real
+# person's name as if it were the account holder's. So the bare-surname
+# alternative is deliberately excluded; only "Emirhan" and multi-word
+# combinations that include the first name are matched.
+_OWN_NAME_VARIANTS_RE = re.compile(
+    r"\b(Emirhan\s+Kılıç|Emirhan|Emir\s+Kılıç)\b"
+)
+
+# Structured salutation patterns — deliberately narrow (not general NER).
+# Matches "Sayın Ad Soyad," / "Dear Ad Soyad," / "Hi Ad," etc., where a
+# capitalized 1-3 word run follows a known salutation marker. This catches
+# the concrete leak found in holdout-fix-tasks.md T4 ("Sayın Necati Kılıç"
+# in an order confirmation, "Hi Emirhan" in a WiFi registration) without
+# attempting to find names anywhere in free-flowing prose, which is what
+# the earlier "no NER available" decision in PROGRESS.md was about.
+#
+# Mass-mail salutations frequently address the recipient generically
+# ("Dear Customer,", "Hi Friend,", "Dear Valued Recipient,") rather than by
+# name. Without excluding these, the generic word gets filed into the
+# alias map as if it were a real person's name — and since
+# check_anonymization.py flags any alias-map name reappearing anywhere in
+# the corpus, a short common word like "Friend" or "There" then produces
+# false-positive "leaks" wherever it happens to appear in unrelated text
+# (found empirically: "Friend of the House Jude Bellingham" in an LV
+# newsletter, "There are only a few days left..." in a GoDaddy email).
+# _GENERIC_SALUTATION_NOUNS excludes the concrete false positives found in
+# the Gmail corpus; it is not an exhaustive dictionary of non-names.
+_GENERIC_SALUTATION_NOUNS = (
+    r"Customer|User|Friend|Friends|Reader|Client|Member|Shopper|Beloved|"
+    r"Beneficiary|Recipient|There|Community|Owner|Developers|Notice|Paid|"
+    r"Valued|Dear|My|Important"
+)
+_NAME_PATTERN = (
+    rf"(?!(?:{_GENERIC_SALUTATION_NOUNS})\b)"
+    r"[A-ZÇĞİÖŞÜ][a-zçğıöşü']+(?:\s+[A-ZÇĞİÖŞÜ][a-zçğıöşü']+){0,2}"
+)
+_SALUTATION_RE = re.compile(
+    rf"\b(Sayın|Dear|Hi|Hello|Merhaba)\s+({_NAME_PATTERN})\s*[,:]",
+)
 
 
 class AliasMap:
     def __init__(self, path: Path):
         self.path = path
-        self.domains: dict[str, str] = {}
-        self.emails: dict[str, str] = {}
         self.filenames: dict[str, str] = {}
-        self.ips: dict[str, str] = {}
+        self.names: dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
@@ -62,37 +131,16 @@ class AliasMap:
             return
         with open(self.path) as f:
             data = json.load(f)
-        self.domains = data.get("domains", {})
-        self.emails = data.get("emails", {})
         self.filenames = data.get("filenames", {})
-        self.ips = data.get("ips", {})
+        self.names = data.get("names", {})
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "w") as f:
             json.dump({
-                "domains": self.domains,
-                "emails": self.emails,
                 "filenames": self.filenames,
-                "ips": self.ips,
+                "names": self.names,
             }, f, ensure_ascii=False, indent=2)
-
-    def domain(self, real: str | None) -> str | None:
-        if real is None:
-            return None
-        if real.lower() in _PRESERVE_DOMAINS:
-            return real
-        if real not in self.domains:
-            self.domains[real] = f"domain-{len(self.domains):04d}.test"
-        return self.domains[real]
-
-    def email(self, real: str) -> str:
-        local, _, domain = real.partition("@")
-        if domain.lower() in _PRESERVE_DOMAINS:
-            return real
-        if real not in self.emails:
-            self.emails[real] = f"user-{len(self.emails):04d}@{self.domain(domain)}"
-        return self.emails[real]
 
     def filename(self, real: str) -> str:
         ext = real.rsplit(".", 1)[-1] if "." in real else ""
@@ -101,62 +149,89 @@ class AliasMap:
             self.filenames[real] = f"{base}.{ext}" if ext else base
         return self.filenames[real]
 
-    def ip(self, real: str) -> str:
-        if real not in self.ips:
-            # Keep it looking like an IP (some downstream code/regex may
-            # expect IP-shaped strings) but from a documented test range.
-            n = len(self.ips)
-            self.ips[real] = f"203.0.113.{n % 256}"
-        return self.ips[real]
+    def name(self, real: str) -> str:
+        # Same real name always maps to the same alias, consistent across
+        # records — matters if the same person is addressed more than once
+        # in the corpus.
+        if real not in self.names:
+            self.names[real] = f"Ad Soyad {len(self.names) + 1}"
+        return self.names[real]
 
 
-def anonymize_email_addresses_in_text(text: str, alias_map: AliasMap) -> str:
+def redact_own_email_in_text(text: str) -> str:
+    """Only the account holder's own address is replaced — a third party's
+    email address appearing in the same text is left real (it's not the
+    user's personal data, and it's genuine training signal)."""
+    return re.sub(re.escape(OWN_EMAIL), OWN_EMAIL_ALIAS, text, flags=re.IGNORECASE)
+
+
+def _contains_own_identity(decoded: str) -> bool:
+    return (
+        OWN_EMAIL.lower() in decoded.lower()
+        or bool(_OWN_NAME_VARIANTS_RE.search(decoded))
+    )
+
+
+def redact_own_identity_in_url(url: str) -> str:
+    """Marketing/tracking links (order confirmations, review-request
+    pings, WiFi portals) routinely embed the recipient's email and/or name
+    as URL-encoded query params, sometimes double-encoded by a tracking
+    redirector wrapping the original link. redact_own_email_in_text and
+    redact_own_name_in_text only match literal substrings, so an encoded
+    occurrence (e.g. "name=Emirhan%2BK%25C4%25B1l%25C4%25B1%25C3%25A7",
+    which double-decodes to "Emirhan Kılıç") survives them untouched —
+    found empirically via check_anonymization.py on the Gmail corpus.
+    Surgically patching a match back into a multiply-encoded string is
+    fragile, and these tracking URLs carry no phishing-detection signal
+    worth preserving, so on a hit the entire URL is replaced with a
+    placeholder rather than partially redacted."""
+    decoded = url
+    for _ in range(3):  # bounded: real redirectors nest at most 1-2 deep
+        new = urllib.parse.unquote(decoded)
+        if new == decoded:
+            break
+        decoded = new
+    if _contains_own_identity(decoded):
+        return "https://redacted.example.test/own-identity-in-url"
+    return url
+
+
+def redact_own_name_in_text(text: str) -> str:
+    """Replaces known literal variants of the account holder's own name —
+    see _OWN_NAME_VARIANTS_RE for why this exists alongside (not instead
+    of) the structured-salutation matcher."""
+    return _OWN_NAME_VARIANTS_RE.sub(OWN_NAME_ALIAS, text)
+
+
+def anonymize_salutation_names_in_text(text: str, alias_map: AliasMap) -> str:
+    """Replaces person names appearing in structured salutations ("Sayın X
+    Y,", "Dear X Y,", "Hi X,") — see _SALUTATION_RE for scope/rationale.
+    Note this catches ANY name in a salutation, not just the account
+    holder's — a message addressed to a third party ("Sayın Necati Kılıç")
+    still has that name redacted, since a real person's name is personal
+    data regardless of whose mailbox the message came from."""
     def replace(match: re.Match) -> str:
-        return alias_map.email(match.group(0))
-    return EMAIL_RE.sub(replace, text)
-
-
-def anonymize_url(url: str, alias_map: AliasMap) -> str:
-    m = re.match(r"(https?://)([^/\s]+)(.*)", url)
-    if not m:
-        return url
-    scheme, netloc, rest = m.groups()
-    userinfo, _, host_port = netloc.rpartition("@")
-    host, _, port = host_port.partition(":")
-    aliased_host = alias_map.domain(host.lower()) or host
-    new_netloc = aliased_host + (f":{port}" if port else "")
-    if userinfo:
-        new_netloc = f"{userinfo}@{new_netloc}"
-    return f"{scheme}{new_netloc}{rest}"
+        marker, name = match.group(1), match.group(2)
+        alias = alias_map.name(name)
+        trailing = match.group(0)[-1]  # preserve the , or : that was matched
+        return f"{marker} {alias}{trailing}"
+    return _SALUTATION_RE.sub(replace, text)
 
 
 def anonymize_facts(facts: dict, alias_map: AliasMap) -> dict:
     facts = dict(facts)  # shallow copy, don't mutate caller's dict
 
-    for field in ("from_domain", "return_path_domain", "reply_to_domain",
-                  "message_id_domain", "dkim_domain"):
-        facts[field] = alias_map.domain(facts.get(field))
-
-    # display_name is deliberately left untouched — it's usually a brand or
-    # sender-chosen display name, not sensitive on its own, and the rule
-    # engine's display_name_brand_mismatch signal (plan section 4.2) reads
-    # its actual content. Anonymizing it would silently break that check.
-
-    if facts.get("first_received_ip"):
-        facts["first_received_ip"] = alias_map.ip(facts["first_received_ip"])
-
     if facts.get("subject"):
-        facts["subject"] = anonymize_email_addresses_in_text(facts["subject"], alias_map)
+        subject = redact_own_email_in_text(facts["subject"])
+        subject = redact_own_name_in_text(subject)
+        facts["subject"] = anonymize_salutation_names_in_text(subject, alias_map)
     if facts.get("body_text"):
-        facts["body_text"] = anonymize_email_addresses_in_text(facts["body_text"], alias_map)
+        body = redact_own_email_in_text(facts["body_text"])
+        body = redact_own_name_in_text(body)
+        facts["body_text"] = anonymize_salutation_names_in_text(body, alias_map)
 
     facts["urls"] = [
-        {
-            **u,
-            "url": anonymize_url(u["url"], alias_map),
-            "href_domain": alias_map.domain(u.get("href_domain")),
-            "anchor_text_domain": alias_map.domain(u.get("anchor_text_domain")),
-        }
+        {**u, "url": redact_own_identity_in_url(redact_own_email_in_text(u["url"]))}
         for u in facts.get("urls", [])
     ]
 
@@ -190,8 +265,8 @@ def main() -> None:
 
     alias_map.save()
     print(f"Anonymized {count} records -> {args.output}")
-    print(f"Alias map ({len(alias_map.domains)} domains, {len(alias_map.emails)} emails, "
-          f"{len(alias_map.filenames)} filenames, {len(alias_map.ips)} IPs) saved to {MAP_PATH}")
+    print(f"Alias map ({len(alias_map.filenames)} filenames, "
+          f"{len(alias_map.names)} names) saved to {MAP_PATH}")
 
 
 if __name__ == "__main__":

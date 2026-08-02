@@ -15,6 +15,9 @@ PROGRESS.md
 # plan
 seneca-phishing-adapter-final-plan.md
 phishing-adapter-plan-v3.md
+holdout-fix-tasks.md
+codex-holdout-draft-task.md
+scripts/self_labeling_dilemma_summary.md
 
 # internal architecture notes, not for GitHub
 llm-proxy-notes.md

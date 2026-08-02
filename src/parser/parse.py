@@ -63,8 +63,17 @@ def parse_eml(path: Path) -> EmailFacts:
     except Exception:
         raw_body, is_html = "", False
 
-    body_facts = extract_body_facts(raw_body, is_html)
     url_facts = extract_url_facts(raw_body, is_html)
+    # credential_request (T3) needs to know whether the message offers an
+    # action channel (external link / attachment) alongside a request verb
+    # + target object — url_facts/attachment_facts must be computed first.
+    has_action_channel = bool(url_facts) or bool(attachment_facts)
+    body_facts = extract_body_facts(
+        raw_body,
+        is_html,
+        has_action_channel=has_action_channel,
+        has_attachments=bool(attachment_facts),
+    )
 
     subject = _decode_mime_header(raw_msg.get("Subject"))
     date_raw = raw_msg.get("Date")

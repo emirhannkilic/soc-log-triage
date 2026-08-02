@@ -1,0 +1,92 @@
+# Rule engine weight table — v3 plan section 5, CLAUDE.md "Rule engine
+# eşikleri". Calibrated against data/holdout/review.md's 30 hand-labeled
+# emails ONLY (never against training data — locked decision, see CLAUDE.md).
+#
+# Each entry maps to one or more fields from EmailFacts.flat_signals()
+# (schemas/facts.py). "condition" documents how src/rules/engine.py
+# evaluates the signal — the engine is the source of truth for behavior,
+# this file only holds the weight and a human-readable description.
+#
+# Thresholds: score >= 6 -> Phishing, 3-5 -> Muhtemel Phishing, < 3 -> Güvenilir
+
+# phishing eşiği plan v3'ün başlangıç önerisi olan 6'dan 5'e indirildi
+# (Adım 4 kalibrasyonu, data/holdout/review.md'nin 30 maili üzerinde):
+# legitimate sınıfının en yüksek skoru 4 (bkz. calibrate_rules.py çıktısı),
+# yani eşiği 5'e çekmek false_positive_rate'i 0'da tutarken recall'ı
+# %66.7'den %86.7'ye çıkardı (13/15). 6 tutulsaydı 2 ek phishing örneği
+# (skor tam 5) gereksiz yere orta banda düşerdi.
+thresholds:
+  phishing: 5
+  suspicious: 3
+
+signals:
+  spf_or_dmarc_fail:
+    weight: 3
+    description: "SPF fail veya DMARC fail"
+
+  dkim_missing_or_fail_domain_mismatch:
+    weight: 2
+    description: "DKIM yok/fail VE dkim_domain from_domain ile uyuşmuyor"
+
+  return_path_mismatch:
+    weight: 2
+    description: "Return-Path domain != From domain"
+
+  display_name_brand_mismatch:
+    weight: 3
+    description: "Display name'de marka adı var, adres domain'i farklı"
+
+  url_text_href_mismatch:
+    weight: 3
+    description: "Herhangi bir URL'de anchor text domain != href domain"
+
+  url_ip_based:
+    weight: 2
+    description: "Herhangi bir URL IP tabanlı"
+
+  url_punycode:
+    weight: 3
+    description: "Herhangi bir URL punycode domain kullanıyor"
+
+  attachment_risky_type:
+    weight: 3
+    description: "Riskli uzantılı (.exe/.scr/.js vb.) ek var"
+
+  attachment_double_extension:
+    weight: 4
+    description: "Çift uzantılı ek var (örn. invoice.pdf.exe)"
+
+  hidden_text_or_image_only:
+    weight: 2
+    description: "Gizli metin VEYA gövde sadece görselden oluşuyor"
+
+  credential_request_with_external_link:
+    weight: 2
+    description: "Kimlik bilgisi talebi VE en az 1 dış link var"
+
+  urgency_keywords:
+    weight: 1
+    description: "En az 1 aciliyet kalıbı eşleşti"
+
+  is_archive_with_credential_request:
+    weight: 2
+    description: "Arşiv eki VAR ve credential_request true (T5: is_archive tek başına zayıf, bu kombinasyon anlamlı)"
+
+  claims_attachment_but_empty:
+    weight: 2
+    description: "Gövde ek vaat ediyor ('ekte', 'attached') ama attachments boş (T5)"
+
+  from_domain_no_tld:
+    weight: 3
+    description: "from_domain bir nokta içermiyor (TLD yok) — malformed/rastgele hostname, gerçek bir kurumsal domain olamaz. Hold-out kalibrasyonunda 4/4 örnek phishing çıktı, 0 legitimate (Adım 4)."
+
+  all_auth_pass_and_consistent:
+    weight: -3
+    description: "SPF+DKIM+DMARC hepsi pass VE dkim_domain from_domain ile uyumlu VE return-path/reply-to mismatch yok"
+
+# Not: plan v3'ün başlangıç tablosundaki "Alıcı ile önceki yazışma zinciri
+# (In-Reply-To var) -2" sinyali burada YOK — EmailFacts şemasında
+# (schemas/facts.py) In-Reply-To alanı hiç parse edilmiyor (Adım 2 kapsamı
+# Message-ID/routing ile sınırlıydı). Parser'a yeni alan eklemek Adım 2'yi
+# yeniden açmak demek, bu karar CLAUDE.md'de yok — kalibrasyon bu sinyal
+# olmadan yapıldı. Adım 2'ye dönülürse eklenebilir.

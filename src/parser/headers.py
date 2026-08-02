@@ -13,24 +13,59 @@ signature (a phishing email can carry a valid DKIM signature for an
 unrelated domain it doesn't claim to be).
 """
 import re
+from email.header import Header
 from email.message import Message
 from email.utils import getaddresses, parseaddr
 
 _AUTH_RESULT_RE = re.compile(r"\b(spf|dkim|dmarc)=([a-zA-Z0-9_-]+)")
 _DKIM_DOMAIN_RE = re.compile(r"dkim=([a-zA-Z0-9_-]+)[^;]*?header\.[id]=@?([\w.-]+)")
 
+# Last-resort fallback for addresses parseaddr can't handle — e.g. malformed
+# multi-name group syntax like '"Grüner Georg", jehd <service@x.com>', which
+# parseaddr silently returns ('', '') on even after str() coercion of a
+# Header object. This just grabs the last thing that looks like an email
+# address in the string, which is enough to recover a domain even when we
+# can't parse the display name correctly.
+_EMAIL_FALLBACK_RE = re.compile(r"([\w.+-]+@[\w-]+(?:\.[\w-]+)+)")
 
-def _domain_of(address: str) -> str | None:
-    _, addr = parseaddr(address)
-    if not addr or "@" not in addr:
+
+def _coerce_header_str(value) -> str:
+    """Compat32 sometimes hands back an email.header.Header object instead
+    of a plain str for malformed headers (RFC 2047 encoded-words that don't
+    decode cleanly, non-ASCII bytes in odd places). str()-ing it is
+    necessary before any regex/parseaddr call, or those silently fail /
+    crash instead of working on the degraded-but-recoverable text. See
+    holdout-fix-tasks.md T1 — this was the root cause of from_domain=None
+    correlating with phishing samples (Header objects only appeared on
+    phishing_pot's messier headers, not Gmail's)."""
+    if isinstance(value, Header):
+        return str(value)
+    return value or ""
+
+
+def _domain_of(address) -> str | None:
+    address = _coerce_header_str(address)
+    if not address:
         return None
-    return addr.rsplit("@", 1)[-1].lower()
+
+    _, addr = parseaddr(address)
+    if addr and "@" in addr:
+        return addr.rsplit("@", 1)[-1].lower()
+
+    # parseaddr failed (returns ('', '') on some malformed multi-name /
+    # group-syntax addresses even on a clean str) — fall back to a direct
+    # regex scan rather than giving up, since the address is often still
+    # visibly present in the string.
+    m = _EMAIL_FALLBACK_RE.search(address)
+    if m:
+        return m.group(1).rsplit("@", 1)[-1].lower()
+    return None
 
 
 def parse_authentication_results(msg: Message, from_domain: str | None) -> dict:
     """Returns spf_result, dkim_result, dmarc_result, dkim_domain,
     dkim_domain_matches_from."""
-    header = msg.get("Authentication-Results", "")
+    header = _coerce_header_str(msg.get("Authentication-Results"))
     header = re.sub(r"\s+", " ", header)
 
     spf_result = dmarc_result = None
@@ -71,16 +106,62 @@ _BRAND_NAMES = [
     "paypal", "apple", "microsoft", "google", "amazon", "netflix",
     "vakifbank", "vakıfbank", "garanti", "isbank", "iş bankası", "akbank",
     "ziraat", "yapikredi", "yapı kredi", "dhl", "fedex", "ups",
+    "facebook", "instagram", "whatsapp", "coinbase", "binance", "trust wallet",
+    "bradesco", "itau", "itaú", "santander", "correios", "chronopost",
+    "mercado pago", "mercadopago", "icloud", "google storage",
 ]
 
 
+_RECEIVED_FOR_RE = re.compile(r"\bfor\s+<?([\w.+-]+@[\w.-]+)>?", re.IGNORECASE)
+
+
+def _from_domain_with_source(msg: Message) -> tuple[str | None, str | None]:
+    """Tries From -> Sender -> Return-Path -> the 'for=' address in the
+    oldest Received header, in that order, and returns (domain, source) —
+    source records which one actually worked so a None result downstream
+    means "genuinely no sender address found," not "we only tried one
+    header and gave up." See holdout-fix-tasks.md T1."""
+    from_header = _coerce_header_str(msg.get("From", ""))
+    domain = _domain_of(from_header)
+    if domain:
+        return domain, "From"
+
+    sender_header = _coerce_header_str(msg.get("Sender", ""))
+    domain = _domain_of(sender_header)
+    if domain:
+        return domain, "Sender"
+
+    return_path_header = _coerce_header_str(msg.get("Return-Path", ""))
+    domain = _domain_of(return_path_header)
+    if domain:
+        return domain, "Return-Path"
+
+    received_headers = msg.get_all("Received", [])
+    if received_headers:
+        # oldest hop (closest to origin) is last in the list
+        oldest = _coerce_header_str(received_headers[-1])
+        m = _RECEIVED_FOR_RE.search(oldest)
+        if m:
+            domain = _domain_of(m.group(1))
+            if domain:
+                return domain, "Received-for"
+
+    return None, None
+
+
 def parse_address_facts(msg: Message) -> dict:
-    """Returns from_domain, return_path_domain, reply_to_domain,
+    """Returns from_domain, from_source, return_path_domain, reply_to_domain,
     return_path_mismatch, reply_to_mismatch, display_name,
     display_name_has_email, display_name_brand_mismatch."""
-    from_header = msg.get("From", "")
-    display_name, from_addr = parseaddr(from_header)
-    from_domain = _domain_of(from_addr) if from_addr else None
+    from_header = _coerce_header_str(msg.get("From", ""))
+    display_name, _ = parseaddr(from_header)
+    if not display_name and from_header:
+        # parseaddr couldn't extract a display name either (same malformed
+        # multi-name case as the address itself) — leave it as None rather
+        # than a misleading empty string.
+        display_name = None
+
+    from_domain, from_source = _from_domain_with_source(msg)
 
     return_path_domain = _domain_of(msg.get("Return-Path", ""))
     reply_to_domain = _domain_of(msg.get("Reply-To", ""))
@@ -104,6 +185,7 @@ def parse_address_facts(msg: Message) -> dict:
 
     return {
         "from_domain": from_domain,
+        "from_source": from_source,
         "return_path_domain": return_path_domain,
         "reply_to_domain": reply_to_domain,
         "return_path_mismatch": return_path_mismatch,
@@ -117,7 +199,7 @@ def parse_address_facts(msg: Message) -> dict:
 def parse_routing_facts(msg: Message, from_domain: str | None) -> dict:
     """Returns message_id_domain, message_id_domain_matches_from,
     received_hop_count, first_received_ip."""
-    message_id = msg.get("Message-ID", "") or msg.get("Message-Id", "")
+    message_id = _coerce_header_str(msg.get("Message-ID") or msg.get("Message-Id"))
     message_id_domain = None
     m = re.search(r"@([\w.-]+)>?\s*$", message_id.strip())
     if m:
@@ -135,7 +217,8 @@ def parse_routing_facts(msg: Message, from_domain: str | None) -> dict:
     if received_headers:
         # Received headers are prepended by each hop, so the LAST one in
         # the list is closest to the original sender.
-        m = re.search(r"\[?(\d{1,3}(?:\.\d{1,3}){3})\]?", received_headers[-1])
+        oldest_received = _coerce_header_str(received_headers[-1])
+        m = re.search(r"\[?(\d{1,3}(?:\.\d{1,3}){3})\]?", oldest_received)
         if m:
             first_received_ip = m.group(1)
 

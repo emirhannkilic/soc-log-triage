@@ -165,10 +165,61 @@ def test_double_extension_detected():
     assert _has_double_extension("archive.tar.gz") is False  # gz not risky
 
 
+def test_double_extension_detected_for_archive():
+    """holdout-fix-tasks.md T5: 'invoice.pdf.zip' disguising a payload
+    behind a fake document extension is the same disguise pattern as
+    'invoice.pdf.exe' — double_extension must also fire for archives."""
+    from src.parser.attachments import _has_double_extension
+    assert _has_double_extension("invoice.pdf.zip") is True
+
+
 def test_risky_extension():
     from src.parser.attachments import _extension_of
     assert _extension_of("invoice.exe") == "exe"
     assert _extension_of("noext") is None
+
+
+def test_archive_extension_is_not_risky_type():
+    """holdout-fix-tasks.md T5: archives get their own is_archive signal,
+    separate from risky_type — a .zip order confirmation attachment isn't
+    inherently malicious the way a .exe is."""
+    import email
+    msg = email.message_from_string(
+        "Content-Type: multipart/mixed; boundary=B\n\n"
+        "--B\n"
+        "Content-Type: application/zip\n"
+        "Content-Disposition: attachment; filename=\"invoice.zip\"\n\n"
+        "fake payload\n"
+        "--B--\n"
+    )
+    facts = extract_attachment_facts(msg)
+    assert len(facts) == 1
+    assert facts[0]["is_archive"] is True
+    assert facts[0]["risky_type"] is False
+
+
+def test_inline_image_not_counted_as_attachment():
+    """holdout-fix-tasks.md T5 spot-check finding: inline signature/logo
+    images (Content-Disposition: inline) with a filename were being
+    counted as attachments, inflating attachment-risk facts with pure
+    noise — an embedded email-signature logo isn't a security signal."""
+    import email
+    msg = email.message_from_string(
+        "Content-Type: multipart/mixed; boundary=B\n\n"
+        "--B\n"
+        "Content-Type: image/png\n"
+        "Content-Disposition: inline; filename=\"image001.png\"\n\n"
+        "fake image bytes\n"
+        "--B\n"
+        "Content-Type: application/pdf\n"
+        "Content-Disposition: attachment; filename=\"invoice.pdf\"\n\n"
+        "fake pdf bytes\n"
+        "--B--\n"
+    )
+    facts = extract_attachment_facts(msg)
+    filenames = [f["filename"] for f in facts]
+    assert "image001.png" not in filenames
+    assert "invoice.pdf" in filenames
 
 
 # --- body.py --------------------------------------------------------
@@ -183,18 +234,101 @@ def test_detect_language_english():
 
 def test_urgency_keywords_detected():
     facts = extract_body_facts("Your account will be suspended. Click here to verify your account now.", is_html=False)
-    assert "suspended" in facts["urgency_keywords"]
-    assert "verify your account" in facts["urgency_keywords"]
+    matched = {m["keyword"] for m in facts["urgency_keywords"]}
+    assert "suspended" in matched
+    assert "verify your account" in matched
+    # each match must carry surrounding context, not just the bare keyword
+    # (case-insensitive: matching is case-insensitive, e.g. "Click here")
+    for m in facts["urgency_keywords"]:
+        assert m["keyword"].lower() in m["context"].lower()
 
 
-def test_credential_request_detected():
-    facts = extract_body_facts("Lütfen şifrenizi ve kart numaranızı giriniz.", is_html=False)
+def test_urgency_keyword_substring_false_positive_avoided():
+    """holdout-fix-tasks.md T2: 'acil' must not match inside French
+    'facilement' — this was a real bug that made unrelated German/French
+    spam pick up Turkish urgency keywords."""
+    facts = extract_body_facts("Ceci est facilement compris par tous.", is_html=False)
+    matched = {m["keyword"] for m in facts["urgency_keywords"]}
+    assert "acil" not in matched
+
+
+def test_urgency_keyword_turkish_suffix_matches():
+    """'hemen' should match even with following punctuation/words (word
+    boundary at the START only, per body.py's design), and Turkish 'acil'
+    with a legitimate suffix like 'acilen' should still be caught."""
+    facts = extract_body_facts("Hemen tıklayın, hesabınızı doğrulayın!", is_html=False)
+    matched = {m["keyword"] for m in facts["urgency_keywords"]}
+    assert "hemen" in matched
+
+
+def test_credential_request_needs_action_channel():
+    """holdout-fix-tasks.md T3: verb + target object alone (no link/
+    attachment/form) is NOT enough to flag credential_request — the same
+    text without an action channel should be False, but True once one is
+    present. This is what distinguishes an actual phishing ask from prose
+    that happens to mention a password."""
+    text = "Lütfen şifrenizi giriniz ve hesabınızı doğrulayınız."
+    without_channel = extract_body_facts(text, is_html=False, has_action_channel=False)
+    assert without_channel["credential_request"] is False
+
+    with_channel = extract_body_facts(text, is_html=False, has_action_channel=True)
+    assert with_channel["credential_request"] is True
+
+
+def test_credential_request_security_notice_not_flagged():
+    """holdout-fix-tasks.md T3 regression: a message that mentions
+    'password' only as a security notice ("we will never ask for your
+    password") must NOT be flagged — there's a target object but no
+    request verb directed at the reader."""
+    text = ("Firmamız hiçbir zaman kullanıcı adı, şifre veya kişisel "
+            "bilgilerinizi e-posta ile istememektedir.")
+    facts = extract_body_facts(text, is_html=False, has_action_channel=True)
+    assert facts["credential_request"] is False
+
+
+def test_credential_request_relogin_phishing_detected():
+    """holdout-fix-tasks.md T3 regression: 'kindly re-login with the
+    attachment' + mailbox + an action channel must be flagged — this was
+    the false negative the old word-list-only check missed."""
+    text = ("Your mailbox cloud capacity is at 97%. kindly re-login with "
+            "the attachment to ensure that your mailbox does not reach "
+            "full capacity.")
+    facts = extract_body_facts(text, is_html=False, has_action_channel=True)
     assert facts["credential_request"] is True
 
 
 def test_no_credential_request_in_normal_text():
-    facts = extract_body_facts("Yarın toplantımız var, saat 10da görüşelim.", is_html=False)
+    facts = extract_body_facts("Yarın toplantımız var, saat 10da görüşelim.",
+                                is_html=False, has_action_channel=True)
     assert facts["credential_request"] is False
+
+
+def test_claims_attachment_when_none_exists():
+    """holdout-fix-tasks.md T5, candidate 15: 'Attached Re-login' promises
+    an attachment but the message has none (it's actually a link) —
+    promising a nonexistent file is itself a signal."""
+    text = ("Your mailbox cloud capacity is at 97%. kindly re-login with "
+            "the attachment to ensure continued access.")
+    facts = extract_body_facts(text, is_html=False, has_attachments=False)
+    assert facts["claims_attachment"] is True
+
+
+def test_no_claims_attachment_when_attachment_present():
+    text = "Please find the invoice attached for your records."
+    facts = extract_body_facts(text, is_html=False, has_attachments=True)
+    assert facts["claims_attachment"] is False
+
+
+def test_no_claims_attachment_when_not_mentioned():
+    facts = extract_body_facts("Yarın toplantımız var, saat 10da görüşelim.",
+                                is_html=False, has_attachments=False)
+    assert facts["claims_attachment"] is False
+
+
+def test_claims_attachment_turkish():
+    facts = extract_body_facts("Faturanız ekte yer almaktadır.",
+                                is_html=False, has_attachments=False)
+    assert facts["claims_attachment"] is True
 
 
 def test_html_form_detected():
