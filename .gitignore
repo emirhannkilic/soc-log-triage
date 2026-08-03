@@ -7,6 +7,13 @@ __pycache__/
 *.pyc
 .claude/
 
+# training/generation run logs — makine ve çalıştırmaya özgü, kod değil
+logs/
+*.log
+
+# macOS
+.DS_Store
+
 
 # claude
 CLAUDE.md 

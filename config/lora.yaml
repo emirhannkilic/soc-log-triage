@@ -1,0 +1,68 @@
+# v3 plan §7.1 starting hyperparameters (phishing-adapter-plan-v3.md,
+# CLAUDE.md "Kilitlenen Kararlar"). scale = alpha/rank = 32/16 = 2.0,
+# per mlx_lm's LoRA convention (self.scale * lora_b @ lora_a).
+model: "models/Seneca-Cybersecurity-LLM_x_Qwen2.5-7B-CyberSecurity-mlx-4bit"
+train: true
+data: "data/training/lora_data"
+adapter_path: "models/lora_adapters"
+
+fine_tune_type: lora
+num_layers: 16
+
+# mask_prompt: only the assistant turn's tokens (the JSON report)
+# contribute to the loss — the model shouldn't be scored on reproducing
+# the system/user prompt. Required for ChatDataset to actually mask
+# (mlx_lm defaults mask_prompt to False, which computes loss over the
+# entire rendered chat).
+mask_prompt: true
+
+batch_size: 1
+# iters 1000'den 400'e düşürüldü (2026-08-03, ikinci kernel panic sonrası).
+# 206 train örneği + batch_size=1 → 1 epoch = 206 iter, yani 400 ≈ 1.94
+# epoch (1000 ≈ 4.85 epoch idi). İki gerekçe:
+# (1) Süre/risk: fansız Mac Air'de ölçülen hız ~2 dk/iter civarındaysa
+#     1000 iter ~33 saat kesintisiz GPU yükü demek — iki panic gördükten
+#     sonra gerçekçi değil. 400 bunu ~13 saate indiriyor.
+# (2) Öğrenilecek şey dar: adapter "phishing nasıl tespit edilir"i değil
+#     (o rule engine'de), facts→sabit şemalı Türkçe JSON eşlemesini
+#     öğreniyor. 206 örneğin hepsi aynı şemayı aynı üslupla dolduruyor;
+#     bu kalıp tipik olarak 1-3 epoch'ta oturur. 229 örnekte 5 epoch
+#     rank=16 ile overfit riski taşıyor — 400 taviz değil, muhtemelen
+#     daha isabetli bir nokta.
+iters: 400
+learning_rate: 1.0e-5
+max_seq_length: 4096
+
+# val_batches=-1 (tüm 23 valid örneği) + steps_per_eval=50 ilk denemede
+# validation'ın tek başına ~9 saat sürmesine yol açtı (23 örnek × ~65-70sn/
+# örnek, 20 kere tekrarlanarak) — toplam tahmini süreyi ~27 saate
+# çıkarıyordu. val_batches=5'e düşürüldü (hâlâ anlamlı bir örneklem,
+# validation sadece izleme amaçlı, eğitimin kendisini yönlendirmiyor),
+# steps_per_eval=100'e çıkarıldı — toplam validation süresini ~9 saatten
+# ~1 saate indiriyor.
+val_batches: 5
+steps_per_report: 10
+# steps_per_eval 100'den 50'ye düşürüldü (2026-08-03, iters=400 ile
+# birlikte): 400 iter'de steps_per_eval=100 sadece 4 validation noktası
+# verirdi (iter 100/200/300/400) — val loss'un nerede dibe vurup
+# yükselmeye başladığı görülemez, dolayısıyla save_every=20'nin ürettiği
+# 20 checkpoint arasından hangisinin en iyisi olduğu seçilemezdi.
+# 50 ile 8 nokta oluyor; val_batches=5 sayesinde her biri ~1-2 dk,
+# toplam ek maliyet ihmal edilebilir.
+steps_per_eval: 50
+
+# save_every 50'den 20'ye düşürüldü (2026-08-03): ilk deneme mlx_lm.lora
+# çalışırken macOS kernel panic ile çöktü (IOGPUFamily "completeMemory()
+# prepare count underflow", Metal/GPU driver hatası, fansız Mac Air'de
+# uzun süreli GPU yükünde tetiklendiği bilinen bir durum — kodun kendi
+# hatası değil). Panic ilk save-point'e (iter 50) ulaşmadan oldu, hiç
+# checkpoint yazılamadı, baştan başlamak gerekti. 20'ye düşürmek olası
+# bir sonraki panic'te kaybedilecek işi sınırlıyor.
+save_every: 20
+
+lora_parameters:
+  rank: 16
+  scale: 2.0
+  dropout: 0.0
+
+seed: 7
