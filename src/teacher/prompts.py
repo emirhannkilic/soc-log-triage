@@ -29,9 +29,24 @@ Diğer kurallar:
 - Raporundaki HER teknik iddia, sana verilen TESPİT EDİLEN BULGULAR listesindeki \
 bir bulguya dayanmalı. Bulgularda olmayan hiçbir şey uydurma (ör. olmayan bir header, \
 olmayan bir URL sayısı, GÖVDE metnini okuyarak kendi başına çıkardığın bir gözlem).
+- Raporun TONU verilen KARAR ile tutarlı olmak zorunda. KARAR "Phishing" ise \
+metinde "güvenilir görünüyor", "zararsız", "sorun yok" gibi ifadeler KULLANMA; \
+KARAR "Güvenilir" ise alarm dili kullanma. Kararı sorgulama, yumuşatma ya da \
+tartışma — o karar deterministik bir kural motorundan geliyor ve senin işin onu \
+AÇIKLAMAK.
+- "BU KARARI ÜRETEN KURALLAR" listesi raporunun iskeletidir: teknik bulguların o \
+kuralların karşılığı olmalı. Ham bulgulardan kendi başına ters bir sonuç çıkarma \
+(ör. "dkim_result: pass" görüp "DKIM geçerli, demek ki güvenilir" DEME — kural \
+listesi DKIM'i bir sorun olarak işaretlediyse, sorun odur).
+- Domain'ler arasında var olmayan ilişki UYDURMA (ör. iki ilgisiz domain için \
+"biri diğerinin alt domain'i" deme). Hangi alanın ne olduğuna dikkat et: \
+from_domain, return_path_domain ve reply_to_domain FARKLI alanlardır.
 - "Güvenilir" kararlarda "phishing_gostergeleri" boş bir liste OLABİLİR ve genellikle \
 OLMALIDIR — her maile zorla bir gösterge uydurma.
 - Tüm metin alanları Türkçe olmalı.
+- JSON metin alanlarının İÇİNDE çift tırnak (") KULLANMA. Bir kelimeyi \
+vurgulamak ya da alıntılamak gerekiyorsa tek tırnak kullan: 'böyle'. Çift \
+tırnak string'i erken kapatır ve çıktının tamamı geçersiz JSON olur.
 
 JSON şeması:
 {
@@ -64,9 +79,31 @@ def build_user_prompt(facts: EmailFacts, verdict: Verdict) -> str:
     signals = facts.flat_signals()
     findings = _nonempty_signals(signals)
 
+    # The fired rules, not just the final score. Without them the model sees
+    # raw facts and has to re-derive why the verdict is what it is — and it
+    # derives it wrongly. On a real sample (sample-8611) the facts showed
+    # dkim_result "pass" with dkim_domain ladelanoagency.com against a
+    # from_domain of jwgmedia.com; the model read "DKIM pass" and wrote that
+    # the message "güvenilir görünmektedir" inside a report headed Phishing.
+    # The rule engine had in fact fired dkim_pass_but_domain_mismatch (+3)
+    # for exactly that mismatch — the model just never saw it.
+    #
+    # This is not the model classifying: the verdict is still handed to it.
+    # It is being told which evidence produced that verdict, so the prose can
+    # cite the real reasons instead of inventing plausible ones.
+    if verdict.matches:
+        rules_block = "\n".join(
+            f"  {m.weight:+d}  {m.description}" for m in verdict.matches)
+    else:
+        rules_block = "  (hiçbir kural tetiklenmedi)"
+
     return f"""KARAR: {verdict.verdict}
 SKOR: {verdict.score}
-TESPİT EDİLEN BULGULAR:
+
+BU KARARI ÜRETEN KURALLAR (raporun gerekçesi BUNLAR olmalı):
+{rules_block}
+
+TESPİT EDİLEN BULGULAR (ham veri — yukarıdaki kuralları desteklemek için):
 {json.dumps(findings, ensure_ascii=False, indent=2)}
 
 E-POSTA KONUSU: {facts.subject or "(konu yok)"}

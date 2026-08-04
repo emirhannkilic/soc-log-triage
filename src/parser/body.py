@@ -134,6 +134,59 @@ def get_body(msg: Message) -> tuple[str, bool]:
     return content, body.get_content_type() == "text/html"
 
 
+# Corporate mail gateways prepend or append a fixed security banner to every
+# message that arrives from outside the organisation ("EXTERNAL EMAIL —
+# verify the sender…"). That banner is not part of the email under analysis:
+# it is text the *defender* added, and it is identical across every external
+# message the gateway handles.
+#
+# Leaving it in does real damage. On a real sample it was 59% of the body,
+# and the LLM — asked to report technical findings — mined the banner's own
+# advice checklist and presented it as evidence: "E-posta, 'Gönderici adı ve
+# e-posta adresini doğrulayınız' gibi bir uyarı mesajı içeriyor." That is a
+# finding about the security banner, not about the phishing email. The
+# banner's vocabulary (doğrula, dikkat, kontrol, güvenlik, tıkla) also sits
+# directly in the space the urgency and credential-request patterns search.
+#
+# Matching is anchored on the banner HEADING, not on any single keyword, so
+# an ordinary email that happens to use the word "güvenlik" is untouched.
+# Everything from the heading to the end of the body is removed: these
+# banners are appended as a trailing block, and their internal wording varies
+# far more than their heading does.
+_GATEWAY_BANNER_RE = re.compile(
+    r"""(?:^|\n)\s*
+    (?:
+        HAR[İI]C[İI]\s+E-?POSTA(?:\s+B[İI]LG[İI]LEND[İI]RMES[İI])?
+      | D[İI][ŞS]\s+KAYNAKLI\s+E-?POSTA
+      | EXTERNAL\s+E-?MAIL(?:\s+WARNING)?
+      | CAUTION\s*:\s*(?:This\s+e-?mail|External)
+      | \[?\s*EXTERNAL\s*\]?\s*:?\s*This\s+message
+    )
+    .*$""",
+    re.IGNORECASE | re.VERBOSE | re.DOTALL,
+)
+
+
+def strip_gateway_banner(text: str) -> tuple[str, bool]:
+    """Remove a corporate mail gateway's external-sender banner.
+
+    Returns (cleaned_text, was_stripped). The banner is dropped rather than
+    kept in a separate field: nothing downstream needs its contents, and
+    every consumer of body_text (urgency patterns, credential detection,
+    the LLM prompt) is better off without it.
+
+    An empty result is returned as-is. That case is meaningful rather than
+    broken: a body consisting of nothing but a gateway banner means the
+    real message carried no text at all, which is exactly what
+    image_only_body needs to see. Suppressing the strip to avoid an empty
+    string would hide that.
+    """
+    match = _GATEWAY_BANNER_RE.search(text)
+    if not match:
+        return text, False
+    return text[:match.start()].strip(), True
+
+
 def html_to_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(separator="\n")
@@ -174,13 +227,23 @@ def extract_body_facts(
                 has_hidden_text = True
                 break
 
-        images = soup.find_all("img")
-        image_only_body = bool(images) and len(text.strip()) < 20
+        has_images = bool(soup.find_all("img"))
     else:
         text = raw_body.strip()
         has_html_form = False
         has_hidden_text = False
-        image_only_body = False
+        has_images = False
+
+    # Strip before ANY signal is computed: the banner must not reach the
+    # urgency patterns, credential detection, language detection or the
+    # body_text that later goes into the LLM prompt.
+    text, gateway_banner_stripped = strip_gateway_banner(text)
+
+    # Computed AFTER stripping, deliberately. An image-only email that
+    # passed through a gateway carries hundreds of characters of banner
+    # text, so measuring before the strip would report image_only_body as
+    # False for exactly the messages the signal exists to catch.
+    image_only_body = has_images and len(text.strip()) < 20
 
     detected_language = detect_language(text[:BODY_TEXT_MAX_CHARS])
     # Gate keyword lists by detected language (T2 point 3) — unless

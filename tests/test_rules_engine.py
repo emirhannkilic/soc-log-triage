@@ -90,6 +90,40 @@ def test_dkim_missing_but_domain_matches_does_not_fire():
     )
 
 
+def test_dkim_pass_but_wrong_domain_fires():
+    """A VALID signature from the wrong domain is third-party spoofing: the
+    attacker signs with a domain they control while From claims another.
+    The missing/failing-DKIM rule does not cover it, so this slipped through
+    entirely — found on a phishing sample that scored 2 (Güvenilir) with
+    DKIM signed by ladelanoagency.com for a From of jwgmedia.com."""
+    result = evaluate(
+        signals(dkim_result="pass", dkim_domain="other.com",
+                dkim_domain_matches_from=False), RULES)
+    assert any(m.signal == "dkim_pass_but_domain_mismatch" for m in result.matches)
+
+
+def test_dkim_pass_matching_domain_does_not_fire_spoof_signal():
+    result = evaluate(signals(dkim_result="pass", dkim_domain_matches_from=True), RULES)
+    assert not any(m.signal == "dkim_pass_but_domain_mismatch" for m in result.matches)
+
+
+def test_auth_bonus_survives_return_path_mismatch():
+    """An ESP routes bounces through its own domain, so return_path_mismatch
+    is the normal state of legitimate bulk mail — it must not cancel the
+    all-auth-pass bonus. 16 of 17 measured false positives were caused by
+    exactly that."""
+    result = evaluate(signals(return_path_mismatch=True,
+                              return_path_domain="bounces.esp.example"), RULES)
+    assert any(m.signal == "all_auth_pass_and_consistent" for m in result.matches)
+
+
+def test_auth_bonus_requires_matching_dkim_domain():
+    """The bonus rests on DKIM proving the sender's own domain. Without that
+    match there is no evidence of identity and no bonus."""
+    result = evaluate(signals(dkim_domain_matches_from=False), RULES)
+    assert not any(m.signal == "all_auth_pass_and_consistent" for m in result.matches)
+
+
 def test_credential_request_needs_external_link():
     without_link = evaluate(signals(credential_request=True, url_count=0), RULES)
     with_link = evaluate(signals(credential_request=True, url_count=1), RULES)
@@ -101,6 +135,36 @@ def test_credential_request_needs_external_link():
     )
 
 
+def test_reply_to_free_mail_fires():
+    """A corporate sender redirecting replies to consumer webmail is the
+    shape of 419 fraud and BEC. Found on a real sample sent from
+    firat.edu.tr with SPF and DKIM passing, no URLs and no attachments —
+    every technical signal clean — but Reply-To on gmail.com. It scored 1
+    (Güvenilir)."""
+    result = evaluate(signals(from_domain="firat.edu.tr",
+                              reply_to_domain="gmail.com",
+                              reply_to_mismatch=True), RULES)
+    assert any(m.signal == "reply_to_free_mail" for m in result.matches)
+
+
+def test_reply_to_free_mail_needs_corporate_from():
+    """A free-mail sender replying to free mail is ordinary personal
+    correspondence, not the pattern this signal describes."""
+    result = evaluate(signals(from_domain="gmail.com",
+                              reply_to_domain="yahoo.com",
+                              reply_to_mismatch=True), RULES)
+    assert not any(m.signal == "reply_to_free_mail" for m in result.matches)
+
+
+def test_reply_to_corporate_domain_does_not_fire():
+    """The raw mismatch is too noisy to score (40% of phishing but 25% of
+    legitimate mail); only the free-mailbox variant qualifies."""
+    result = evaluate(signals(from_domain="sender.com",
+                              reply_to_domain="replies.sender-crm.com",
+                              reply_to_mismatch=True), RULES)
+    assert not any(m.signal == "reply_to_free_mail" for m in result.matches)
+
+
 def test_from_domain_no_tld_fires():
     result = evaluate(signals(from_domain="randomhostname"), RULES)
     assert any(m.signal == "from_domain_no_tld" for m in result.matches)
@@ -109,6 +173,50 @@ def test_from_domain_no_tld_fires():
 def test_from_domain_with_tld_does_not_fire():
     result = evaluate(signals(from_domain="example.com"), RULES)
     assert not any(m.signal == "from_domain_no_tld" for m in result.matches)
+
+
+def test_url_shortener_fires():
+    """The parser has extracted is_shortener since Adım 2, but the rule
+    engine had no matching signal until 2026-08-04 — a real phishing sample
+    hid its target behind rebrand.ly and scored nothing for it."""
+    result = evaluate(signals(url_count=1, url_shortener_count=1), RULES)
+    assert any(m.signal == "url_shortener" for m in result.matches)
+
+
+def test_url_shortener_does_not_fire_without_shortener():
+    result = evaluate(signals(url_count=1, url_shortener_count=0), RULES)
+    assert not any(m.signal == "url_shortener" for m in result.matches)
+
+
+def test_has_html_form_fires():
+    """A <form> in the body means credentials are being collected inside the
+    mail client itself — legitimate senders link to their own site instead."""
+    result = evaluate(signals(has_html_form=True), RULES)
+    assert any(m.signal == "has_html_form" for m in result.matches)
+
+
+def test_display_name_has_email_fires():
+    """The inbox shows the display name, not the address. Making the display
+    name itself an address ("destek@banka.com" <x@evil.ru>) forges the only
+    thing the recipient sees."""
+    result = evaluate(signals(display_name_has_email=True), RULES)
+    assert any(m.signal == "display_name_has_email" for m in result.matches)
+
+
+def test_url_redirect_param_fires():
+    result = evaluate(signals(url_count=1, url_redirect_param_count=1), RULES)
+    assert any(m.signal == "url_redirect_param" for m in result.matches)
+
+
+def test_new_signals_do_not_fire_on_clean_email():
+    """None of the three signals added on 2026-08-04 may fire on a clean
+    baseline — they were added precisely because they never triggered in the
+    hold-out, so a false positive here would be a coding error."""
+    result = evaluate(signals(), RULES)
+    fired = {m.signal for m in result.matches}
+    assert "has_html_form" not in fired
+    assert "display_name_has_email" not in fired
+    assert "url_redirect_param" not in fired
 
 
 def test_claims_attachment_but_empty_fires():

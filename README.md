@@ -28,7 +28,13 @@ to compute a weighted sum over them is the wrong tool for the category, no
 matter how large the model. So responsibility is split:
 
 ```
-.eml file
+.eml file, or a raw message pasted as text
+    │
+    ▼
+┌──────────────────────┐
+│  router              │  structural: file extension, or ≥3 RFC 5322 headers
+│  (deterministic)     │  → accept, or explain what is missing
+└──────────────────────┘
     │
     ▼
 ┌──────────────────────┐
@@ -74,23 +80,55 @@ demonstration of the approach — not the best achievable accuracy.
 
 ### Rule engine (the component that actually classifies)
 
-Calibrated on a hand-labelled hold-out set of 30 emails (15 phishing, 15
-legitimate):
+Measured on a hand-labelled hold-out set of **80 emails** (15 phishing, 65
+legitimate), with 22 weighted signals and thresholds at ≥5 / 3–4 / <3:
 
 | Metric | Value | Meaning |
 |---|---|---|
 | Recall | 86.7% (13/15) | Phishing caught above the upper threshold |
-| False-positive rate | 0.0% (0/15) | Legitimate mail wrongly flagged |
-| Abstention rate | 23.3% (7/30) | Landed mid-band, deferred to an analyst |
+| False-positive rate | 12.3% (8/65) | Legitimate mail wrongly flagged |
+| Abstention rate | 7.5% (6/80) | Landed mid-band, deferred to an analyst |
 
-**Read these numbers carefully.** The weights and thresholds were tuned on the
-*same* 30 emails, so this is a **calibration** result, not independent
-validation. The sample is small: 0/15 false positives does not mean the true
-false-positive rate is zero — a Wilson 95% confidence interval puts the upper
-bound near 20%. A single "accuracy" figure is deliberately not reported,
-because the engine emits three classes while ground truth is binary; the
-mid-band is reported as abstention, which in a SOC context is correct
-behaviour rather than error.
+A single "accuracy" figure is deliberately not reported: the engine emits
+three classes while ground truth is binary, and the mid-band is abstention —
+in a SOC context correct behaviour, not error.
+
+#### How the false-positive rate went from "0.0%" to 12.3%
+
+An earlier version of this README reported **0.0% false positives**. That
+number was measured on 15 legitimate emails, and it was wrong — not
+miscalculated, but meaningless at that sample size. It is left described here
+rather than quietly replaced, because how it broke is the more useful result.
+
+The caveat at the time was that a Wilson 95% interval put the upper bound near
+20%. Expanding the legitimate side to 65 hand-labelled emails put the real
+figure at **26.2%** — above even that bound.
+
+The emails it got wrong were not obscure: `google.com`, `email.openai.com`,
+`discord.com`, `client.louisvuitton.com`, `tr-info.adidas.com`. Sixteen of the
+seventeen had SPF, DKIM and DMARC all passing with a matching DKIM domain.
+They were flagged because the one signal that rewards a verified sender
+(`all_auth_pass_and_consistent`, −3) also required Return-Path to match From —
+and every sender using an email service provider routes bounces through the
+provider's domain. Legitimate bulk mail could not earn the bonus by
+construction.
+
+Two fixes brought it to 12.3%: dropping the Return-Path condition from that
+bonus, and adding a signal for a *valid* DKIM signature from the wrong domain
+(third-party spoofing, which the "missing or failing DKIM" rule never covered).
+
+**Both were calibrated on a separate 60-email dev set, never on the hold-out.**
+Tuning against the hold-out would have turned it into a training set. The dev
+set landed at 10.0% and the hold-out at 12.3% — close enough to suggest a real
+improvement rather than a fit to one sample.
+
+#### What the numbers still are, and are not
+
+The original weights and thresholds were tuned on the first 30 emails, so
+those remain a **calibration** result. The 50 legitimate emails added later
+were never used for tuning, which makes the false-positive figure the closest
+thing here to an independent measurement. Recall is still measured on the
+original 15 phishing emails and carries a correspondingly wide interval.
 
 ### LoRA fine-tuning (the report writer)
 
@@ -155,25 +193,32 @@ schemas/
   facts.py              EmailFacts — the parser's output contract
   report.py             Report — the LLM's output contract
 src/
+  demo.py               .eml in, HTML report out — one command
+  web.py                same pipeline behind a browser UI
+  web_ui.html           the UI itself (single page, no build step)
+  router.py             is this input something the pipeline can process?
+  intent.py             persona classifier for prose the router can't resolve
   parser/               deterministic feature extraction
     headers.py            SPF/DKIM/DMARC, address consistency, brand names
     urls.py               text/href mismatch, IP-based, punycode, shorteners
     attachments.py        risky and double extensions, archives
-    body.py               hidden text, image-only bodies, urgency patterns
+    body.py               hidden text, image-only bodies, gateway banners
   rules/engine.py       weighted scoring → verdict
   teacher/              training-data generation with the teacher model
     generate_training_data.py
     prepare_lora_data.py
   eval/
     baseline.py           un-fine-tuned measurement
+    finetuned.py          post-fine-tuning comparison
     groundedness.py       claim-vs-facts verification
 scripts/
   anonymize.py          redacts the mailbox owner's identity
   check_anonymization.py verification pass
   select_holdout.py     hold-out sampling
+  expand_holdout_legitimate.py  append-only hold-out growth
 templates/
   report.html.j2        Jinja2 → HTML report
-tests/                  78 unit tests
+tests/                  103 unit tests
 ```
 
 ---
@@ -206,7 +251,53 @@ cp .env.anonymize.example .env.anonymize
 `.env.anonymize` is gitignored. If it is absent the pipeline degrades safely:
 no personal name is redacted, rather than corrupting the corpus.
 
-### Running
+### Analysing an email
+
+```bash
+# full pipeline: parse → rules → Seneca writes the report → HTML  (~100 s)
+python3 src/demo.py mail.eml --open
+
+# same verdict, same score, same findings — prose written mechanically  (~1 s)
+python3 src/demo.py mail.eml --no-llm --open
+```
+
+`--no-llm` is the right mode for checking a new email, the template, or the
+pipeline: only the wording changes, never the decision.
+
+Two more flags:
+
+- `--adapter 0000400` layers the LoRA adapter on top of Seneca. Off by
+  default — [it measured worse](#lora-fine-tuning-the-report-writer) on both
+  metrics.
+- `--constrain` restricts generation to the report schema via `llguidance`,
+  making malformed JSON structurally impossible. Also off by default: every
+  number reported here was measured without it, and a demo running under
+  different conditions than the measurements would misrepresent both. It
+  earns its keep on emails where the model repeatedly emits an unescaped
+  quote inside a string and the JSON will not parse.
+
+### Browser UI
+
+```bash
+python3 src/web.py          # http://127.0.0.1:8000
+```
+
+Paste a raw email or drag a `.eml` file in. Shows the routing decision, the
+rule engine's verdict with every signal that fired and its weight, and the
+rendered report. The LLM and schema-constraint toggles mirror the CLI flags.
+
+No analysis logic lives in the web layer — it calls the same router, parser,
+rule engine and template as the CLI.
+
+### Routing
+
+```bash
+python3 src/router.py mail.eml              # can the pipeline take this?
+python3 src/router.py --text "$(pbpaste)"   # pasted email
+python3 src/router.py --text "SPF nedir?" --classify   # + intent classifier
+```
+
+### Maintenance
 
 ```bash
 # unit tests
@@ -253,20 +344,30 @@ it is a sign of heavy swapping.
 
 ## Known limitations
 
-- The hold-out set is 30 emails. Every metric derived from it carries a wide
-  confidence interval.
-- Rule-engine thresholds were calibrated on that same hold-out, so those
-  figures are calibration results rather than independent validation.
-- The phishing corpus contains an estimated ~43% pure commercial spam (no brand
-  impersonation, credential request, or false urgency), per a heuristic audit.
-  This is an estimate, not verified ground truth.
+- **Recall rests on 15 phishing emails.** The legitimate side was expanded to
+  65, but the phishing side was not — growing it needs hand-labelling
+  adversarial samples, since the corpus is an estimated ~43% plain commercial
+  spam and the source folder cannot be trusted as a label. 86.7% therefore
+  carries a wide interval.
+- Weights and thresholds were originally calibrated on the first 30 emails, so
+  those remain calibration results. Later fixes were tuned on a separate dev
+  set (see above).
+- **The engine reads the envelope, not the letter.** Nineteen of its 22
+  signals look at headers, URLs or attachments. An email with clean
+  authentication, no links and no attachments is invisible to it however
+  obviously fraudulent the text is. Two known misses are exactly this:
+  Portuguese legal-threat social engineering forwarded through genuine
+  infrastructure with SPF, DKIM and DMARC all passing, and a 419 advance-fee
+  scam sent from a real `.edu.tr` account. The second was partly recovered by
+  a `reply_to_free_mail` signal (corporate sender, replies redirected to
+  consumer webmail) — but only the subset that redirects replies.
 - 9 of 229 training samples (3.9%) exceed the 4096-token sequence limit and
   have their target JSON truncated.
-- Two phishing emails in the hold-out are known misses. One is Portuguese-
-  language legal-threat social engineering forwarded through genuine
-  infrastructure with SPF, DKIM, and DMARC all passing — header signals cannot
-  catch it.
 - The fine-tuned adapter overfit; see the results section.
+- **The router is stage one only.** It answers "is this an email?" from
+  structure. The intent classifier behind it (`--classify`) can name
+  `titus` or `cybersec_qa`, but neither persona is implemented here — it says
+  so instead of pretending to dispatch.
 
 ---
 

@@ -13,9 +13,34 @@ signature (a phishing email can carry a valid DKIM signature for an
 unrelated domain it doesn't claim to be).
 """
 import re
-from email.header import Header
+from email.header import Header, decode_header
 from email.message import Message
 from email.utils import getaddresses, parseaddr
+
+
+def _decode_rfc2047(raw_value) -> str | None:
+    """Decode RFC 2047 encoded-words (=?UTF-8?B?...?=) in a header value.
+
+    Compat32 sometimes hands back an email.header.Header instead of a plain
+    str for malformed headers, so coerce first. Falls back to the raw string
+    on any decode failure — showing something beats raising on a malformed
+    header, and phishing samples are full of malformed headers.
+
+    Lives here rather than in parse.py because headers.py must not import
+    from parse.py (parse.py already imports this module; the reverse would
+    be a cycle). parse.py re-exports it for subject decoding.
+    """
+    if raw_value is None:
+        return None
+    raw_str = str(raw_value)
+    try:
+        return "".join(
+            chunk.decode(charset or "utf-8", errors="replace")
+            if isinstance(chunk, bytes) else chunk
+            for chunk, charset in decode_header(raw_str)
+        )
+    except Exception:
+        return raw_str
 
 _AUTH_RESULT_RE = re.compile(r"\b(spf|dkim|dmarc)=([a-zA-Z0-9_-]+)")
 _DKIM_DOMAIN_RE = re.compile(r"dkim=([a-zA-Z0-9_-]+)[^;]*?header\.[id]=@?([\w.-]+)")
@@ -109,6 +134,16 @@ _BRAND_NAMES = [
     "facebook", "instagram", "whatsapp", "coinbase", "binance", "trust wallet",
     "bradesco", "itau", "itaú", "santander", "correios", "chronopost",
     "mercado pago", "mercadopago", "icloud", "google storage",
+    # Turkish e-commerce, cargo and telecom brands. The corpus is TR/EN mixed
+    # and the banks were already here, but the retail and shipping brands most
+    # often spoofed at Turkish recipients were missing — a real sample spoofing
+    # "Hepsiburada İletişim" from acwild.eu matched nothing.
+    "hepsiburada", "trendyol", "n11", "gittigidiyor", "sahibinden",
+    "getir", "yemeksepeti", "migros", "a101", "bim",
+    "ptt", "aras kargo", "yurtiçi kargo", "yurtici kargo", "mng kargo",
+    "sürat kargo", "surat kargo",
+    "turkcell", "vodafone", "türk telekom", "turk telekom",
+    "e-devlet", "edevlet", "turkiye.gov.tr",
 ]
 
 
@@ -160,6 +195,15 @@ def parse_address_facts(msg: Message) -> dict:
         # multi-name case as the address itself) — leave it as None rather
         # than a misleading empty string.
         display_name = None
+    else:
+        # RFC 2047 decode. parseaddr returns the display name verbatim, so a
+        # non-ASCII one arrives still encoded ("=?UTF-8?Q?Hepsiburada...?=").
+        # Brand matching below is a substring test, which that encoded form
+        # silently defeats: a spoofed Turkish brand name would sit right
+        # there in the header and never match. Found on a real sample whose
+        # display name read "Hepsiburada İletişim" while From was acwild.eu —
+        # scored 2 (Güvenilir) instead of firing display_name_brand_mismatch.
+        display_name = _decode_rfc2047(display_name)
 
     from_domain, from_source = _from_domain_with_source(msg)
 

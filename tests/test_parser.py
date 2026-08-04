@@ -11,7 +11,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.parser.attachments import extract_attachment_facts
-from src.parser.body import detect_language, extract_body_facts
+from src.parser.body import (
+    detect_language,
+    extract_body_facts,
+    strip_gateway_banner,
+)
 from src.parser.headers import parse_address_facts, parse_authentication_results, parse_routing_facts
 from src.parser.parse import parse_eml
 from src.parser.urls import extract_url_facts
@@ -89,6 +93,33 @@ def test_address_facts_brand_display_name_mismatch():
     )
     facts = parse_address_facts(msg)
     assert facts["display_name_brand_mismatch"] is True
+
+
+def test_rfc2047_encoded_display_name_is_decoded():
+    """A non-ASCII display name arrives RFC 2047 encoded, and brand matching
+    is a substring test — so leaving it encoded silently defeats the whole
+    signal. Regression test for a real sample that spoofed
+    'Hepsiburada İletişim' from acwild.eu and scored Güvenilir (2) because
+    the display name was still '=?UTF-8?Q?Hepsiburada_...?=' at match time."""
+    import email
+    msg = email.message_from_string(
+        "From: =?UTF-8?Q?Hepsiburada_=C4=B0leti=C5=9Fim?= <destek@acwild.eu>\n\n"
+    )
+    facts = parse_address_facts(msg)
+    assert facts["display_name"] == "Hepsiburada İletişim"
+    assert facts["display_name_brand_mismatch"] is True
+
+
+def test_encoded_display_name_matching_own_domain_is_not_flagged():
+    """The decode must not turn into a false positive: an encoded display
+    name whose brand DOES match the sending domain is legitimate."""
+    import email
+    msg = email.message_from_string(
+        "From: =?UTF-8?Q?Hepsiburada_=C4=B0leti=C5=9Fim?= "
+        "<bilgi@hepsiburada.com>\n\n"
+    )
+    facts = parse_address_facts(msg)
+    assert facts["display_name_brand_mismatch"] is False
 
 
 def test_routing_facts_message_id_domain():
@@ -410,3 +441,53 @@ if __name__ == "__main__":
 
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
+
+
+def test_gateway_banner_is_stripped():
+    """Corporate gateways append a fixed external-sender banner to every
+    inbound message. It is text the defender added, not part of the email
+    under analysis — and on a real sample it was 59% of the body, which the
+    LLM then mined for fake findings ("E-posta, 'Gönderici adı ve e-posta
+    adresini doğrulayınız' gibi bir uyarı mesajı içeriyor")."""
+    body = (
+        "Merhaba, siparişiniz hazırlanıyor.\n\n"
+        "HARİCİ E-POSTA BİLGİLENDİRMESİ\n"
+        "Bu ileti kurum dışından gönderilmiştir.\n"
+        "• Gönderici adı ve e-posta adresini doğrulayınız.\n"
+        "• Alan adını (domain) dikkatle kontrol ediniz.\n"
+    )
+    cleaned, stripped = strip_gateway_banner(body)
+    assert stripped is True
+    assert "doğrulayınız" not in cleaned
+    assert "siparişiniz hazırlanıyor" in cleaned
+
+
+def test_english_gateway_banner_is_stripped():
+    body = "Hello, your invoice is attached.\n\nCAUTION: This e-mail originated outside the organisation."
+    cleaned, stripped = strip_gateway_banner(body)
+    assert stripped is True
+    assert "your invoice is attached" in cleaned
+    assert "CAUTION" not in cleaned
+
+
+def test_ordinary_body_is_not_stripped():
+    """The match is anchored on the banner heading, so an ordinary email
+    mentioning security vocabulary must survive untouched."""
+    body = "Güvenlik ayarlarınızı kontrol etmek için hesabınıza giriş yapın."
+    cleaned, stripped = strip_gateway_banner(body)
+    assert stripped is False
+    assert cleaned == body
+
+
+def test_banner_does_not_reach_body_signals():
+    """End-to-end: the banner must be gone before urgency/credential
+    patterns and body_text are computed, not merely gone from the report."""
+    body = (
+        "Merhaba, kaydınız tamamlandı.\n\n"
+        "HARİCİ E-POSTA BİLGİLENDİRMESİ\n"
+        "Şüpheli bir durumda hemen bilgi güvenliği ekibine bildiriniz.\n"
+    )
+    facts = extract_body_facts(body, is_html=False)
+    assert "HARİCİ" not in facts["body_text"]
+    assert "bildiriniz" not in facts["body_text"]
+    assert "kaydınız tamamlandı" in facts["body_text"]

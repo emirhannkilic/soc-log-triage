@@ -30,6 +30,8 @@ engine (Adim 4), not a defect to fix away.
 Both are derived from data/holdout/candidates.jsonl.
 """
 import json
+import re
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -133,8 +135,38 @@ def render_suggestion_record(i: int, r: dict) -> str:
     return "\n".join(lines)
 
 
+def _count_filled_labels(path: Path) -> int:
+    """How many GROUND TRUTH lines in an existing review.md carry a label."""
+    if not path.is_file():
+        return 0
+    filled = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "GROUND TRUTH" not in line:
+            continue
+        _, _, after = line.partition("GROUND TRUTH")
+        if re.search(r"\b(phishing|legitimate)\b", after, re.IGNORECASE):
+            filled += 1
+    return filled
+
+
 def main() -> None:
     records = [json.loads(line) for line in open(CANDIDATES_PATH) if line.strip()]
+
+    # review.md is hand-edited: the labels in it ARE the hold-out's ground
+    # truth and cannot be regenerated. Overwriting it would silently destroy
+    # work that took a manual pass over every email, so refuse unless the
+    # caller says so explicitly. (The hold-out grew from 30 to 80 on
+    # 2026-08-04, which is exactly when this script gets re-run — and
+    # exactly when the 30 existing labels are most at risk.)
+    already = _count_filled_labels(REVIEW_PATH)
+    if already and not ("--force" in sys.argv or "--append-new" in sys.argv):
+        raise SystemExit(
+            f"{REVIEW_PATH} zaten {already} etiketlenmiş kayıt içeriyor ve bu\n"
+            f"dosya elle düzenleniyor — üzerine yazmak o etiketleri siler.\n\n"
+            f"Seçenekler:\n"
+            f"  --append-new  sadece yeni kayıtları ekle (mevcut etiketler korunur)\n"
+            f"  --force       her şeyi sıfırdan üret (ETİKETLER KAYBOLUR)\n"
+        )
 
     review_out = [
         "# Hold-out Review — v3 plan section 3.3\n",
@@ -150,6 +182,45 @@ def main() -> None:
         "signals against your independent judgment.\n",
         "---\n",
     ]
+    if "--append-new" in sys.argv:
+        # Keep the existing file verbatim and append only the records it
+        # doesn't cover yet. Records are appended in candidates.jsonl order
+        # and that file is append-only (see expand_holdout_legitimate.py),
+        # so "already covered" is simply the first N records.
+        existing_text = REVIEW_PATH.read_text(encoding="utf-8")
+        covered = len(re.findall(r"^##\s+Candidate\s+\d+\b", existing_text,
+                                 re.MULTILINE))
+        if not covered:
+            raise SystemExit(
+                f"{REVIEW_PATH} içinde '## Candidate N' başlığı bulunamadı — "
+                f"dosya beklenen biçimde değil.\nÜzerine yazma riski nedeniyle "
+                f"durduruldu; --force ile sıfırdan üretilebilir."
+            )
+        new_records = records[covered:]
+        if not new_records:
+            print(f"Yeni kayıt yok — {REVIEW_PATH} zaten {covered} kaydı kapsıyor.")
+            return
+
+        appended = [
+            f"\n<!-- {len(new_records)} yeni aday eklendi "
+            f"(hold-out {covered} -> {len(records)}) -->\n"
+        ]
+        appended += [render_review_record(i, r)
+                     for i, r in enumerate(new_records, start=covered + 1)]
+        REVIEW_PATH.write_text(existing_text.rstrip() + "\n" + "\n".join(appended),
+                               encoding="utf-8")
+
+        # review_suggestions.md holds no hand-written content — it is derived
+        # entirely from the parser — so it is safe to regenerate in full.
+        for i, r in enumerate(records, start=1):
+            suggestions_out.append(render_suggestion_record(i, r))
+        SUGGESTIONS_PATH.write_text("\n".join(suggestions_out), encoding="utf-8")
+
+        print(f"{len(new_records)} yeni kayıt eklendi -> {REVIEW_PATH}")
+        print(f"  (mevcut {covered} etiket korundu)")
+        print(f"Yeniden üretildi -> {SUGGESTIONS_PATH}")
+        return
+
     for i, r in enumerate(records, start=1):
         review_out.append(render_review_record(i, r))
         suggestions_out.append(render_suggestion_record(i, r))

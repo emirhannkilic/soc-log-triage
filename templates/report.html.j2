@@ -52,6 +52,48 @@
     border-radius: 6px;
     padding: 0.9rem 1.1rem;
   }
+
+  /* Künye: parser'ın çıkardığı ham gerçekler. LLM'den GEÇMEZ — doğrudan
+     EmailFacts'ten gelir, dolayısıyla halüsinasyon riski yoktur. */
+  table.kunye {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.92rem;
+  }
+  table.kunye th {
+    text-align: left;
+    vertical-align: top;
+    padding: 0.4rem 0.9rem 0.4rem 0;
+    color: #555;
+    font-weight: 600;
+    white-space: nowrap;
+    width: 1%;
+  }
+  table.kunye td {
+    padding: 0.4rem 0;
+    word-break: break-word;
+  }
+  table.kunye tr + tr th, table.kunye tr + tr td {
+    border-top: 1px solid #eee;
+  }
+  .auth-pass { color: #1e5c2a; font-weight: 600; }
+  .auth-fail { color: #7a1f1f; font-weight: 600; }
+  .auth-none { color: #7a4a00; font-weight: 600; }
+  .url-list { list-style: none; padding: 0; margin: 0; }
+  .url-list li { margin-bottom: 0.45rem; }
+  .url-list li:last-child { margin-bottom: 0; }
+  .url-target { font-family: ui-monospace, Menlo, monospace; font-size: 0.88em; }
+  .url-flag {
+    display: inline-block;
+    font-size: 0.75rem;
+    padding: 0.1em 0.45em;
+    border-radius: 3px;
+    background: #fff4e5;
+    color: #7a4a00;
+    border: 1px solid #f5d8a0;
+    margin-left: 0.35rem;
+  }
+  .muted { color: #777; font-style: italic; }
 </style>
 </head>
 <body>
@@ -71,6 +113,90 @@
   {% if subject %}<div><strong>Konu:</strong> {{ subject }}</div>{% endif %}
   {% if date %}<div><strong>Tarih:</strong> {{ date }}</div>{% endif %}
 </div>
+{% endif %}
+
+{# Künye — doğrudan EmailFacts'ten, modelden GEÇMEDEN. Raporun geri kalanı
+   "neden şüpheli"yi anlatır; bu blok "ne olduğunu" gösterir: gönderen kim,
+   kimlik doğrulaması ne dedi, link nereye gidiyor, ek var mı. Analistin
+   ilk soracağı sorular bunlar. facts geçilmezse blok hiç render edilmez,
+   böylece eski çağrı yerleri bozulmaz. #}
+{% if facts %}
+<section>
+  <h2>E-posta Künyesi</h2>
+  <table class="kunye">
+    <tr>
+      <th>Gönderen</th>
+      <td>
+        {%- if facts.display_name %}{{ facts.display_name }} {% endif -%}
+        {%- if facts.from_domain %}&lt;…@{{ facts.from_domain }}&gt;
+        {%- else %}<span class="muted">bilinmiyor</span>{% endif -%}
+      </td>
+    </tr>
+    {% if facts.return_path_domain and facts.return_path_domain != facts.from_domain %}
+    <tr>
+      <th>Return-Path</th>
+      <td>{{ facts.return_path_domain }} <span class="url-flag">From ile farklı</span></td>
+    </tr>
+    {% endif %}
+    {% if facts.reply_to_domain and facts.reply_to_domain != facts.from_domain %}
+    <tr>
+      <th>Reply-To</th>
+      <td>{{ facts.reply_to_domain }} <span class="url-flag">From ile farklı</span></td>
+    </tr>
+    {% endif %}
+    <tr>
+      <th>Kimlik doğrulama</th>
+      <td>
+        {% for ad, sonuc in [("SPF", facts.spf_result), ("DKIM", facts.dkim_result), ("DMARC", facts.dmarc_result)] -%}
+        {%- if sonuc == "pass" %}<span class="auth-pass">{{ ad }} pass</span>
+        {%- elif sonuc == "fail" %}<span class="auth-fail">{{ ad }} fail</span>
+        {%- else %}<span class="auth-none">{{ ad }} {{ sonuc or "yok" }}</span>{% endif -%}
+        {%- if not loop.last %} · {% endif -%}
+        {%- endfor %}
+      </td>
+    </tr>
+    <tr>
+      <th>Bağlantılar</th>
+      <td>
+        {% if facts.urls %}
+        <ul class="url-list">
+          {% for u in facts.urls %}
+          <li>
+            <span class="url-target">{{ u.url }}</span>
+            {%- if u.is_shortener %}<span class="url-flag">link kısaltıcı</span>{% endif -%}
+            {%- if u.text_href_mismatch %}<span class="url-flag">görünen adres farklı</span>{% endif -%}
+            {%- if u.is_ip_based %}<span class="url-flag">IP tabanlı</span>{% endif -%}
+            {%- if u.has_punycode %}<span class="url-flag">punycode</span>{% endif -%}
+            {%- if u.redirect_param %}<span class="url-flag">yönlendirme parametresi</span>{% endif -%}
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}<span class="muted">yok</span>{% endif %}
+      </td>
+    </tr>
+    <tr>
+      <th>Ekler</th>
+      <td>
+        {% if facts.attachments %}
+        <ul class="url-list">
+          {% for a in facts.attachments %}
+          <li>
+            <span class="url-target">{{ a.filename or "adsız" }}</span>
+            {%- if a.mime_type %} <span class="muted">({{ a.mime_type }})</span>{% endif -%}
+            {%- if a.risky_type %}<span class="url-flag">riskli uzantı</span>{% endif -%}
+            {%- if a.double_extension %}<span class="url-flag">çift uzantı</span>{% endif -%}
+            {%- if a.is_archive %}<span class="url-flag">arşiv</span>{% endif -%}
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}<span class="muted">yok</span>{% endif %}
+      </td>
+    </tr>
+    {% if facts.first_received_ip %}
+    <tr><th>Gönderen IP</th><td class="url-target">{{ facts.first_received_ip }}</td></tr>
+    {% endif %}
+  </table>
+</section>
 {% endif %}
 
 <section>

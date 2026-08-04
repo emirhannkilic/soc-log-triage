@@ -29,7 +29,13 @@ olursa olsun kategorik olarak yanlış araç seçimi. Bu yüzden sorumluluk
 ayrıldı:
 
 ```
-.eml dosyası
+.eml dosyası ya da yapıştırılmış ham mail metni
+    │
+    ▼
+┌──────────────────────┐
+│  router              │  yapısal: dosya uzantısı ya da ≥3 RFC 5322 header
+│  (deterministik)     │  → kabul et, ya da neyin eksik olduğunu söyle
+└──────────────────────┘
     │
     ▼
 ┌──────────────────────┐
@@ -76,22 +82,57 @@ bir gösterim.**
 
 ### Kural motoru (asıl sınıflandırmayı yapan bileşen)
 
-Elle etiketlenmiş 30 maillik bir hold-out setinde (15 phishing, 15 legitimate)
-kalibre edildi:
+Elle etiketlenmiş **80 maillik** bir hold-out setinde (15 phishing, 65
+legitimate), 22 ağırlıklı sinyal ve ≥5 / 3–4 / <3 eşikleriyle ölçüldü:
 
 | Metrik | Değer | Anlamı |
 |---|---|---|
 | Recall | %86.7 (13/15) | Üst eşiğin üstünde yakalanan phishing |
-| Yanlış-pozitif oranı | %0.0 (0/15) | Yanlışlıkla işaretlenen meşru mail |
-| Abstention oranı | %23.3 (7/30) | Orta banda düşüp analiste bırakılan |
+| Yanlış-pozitif oranı | %12.3 (8/65) | Yanlışlıkla işaretlenen meşru mail |
+| Abstention oranı | %7.5 (6/80) | Orta banda düşüp analiste bırakılan |
 
-**Bu rakamları dikkatli okuyun.** Ağırlıklar ve eşikler *aynı* 30 mail üzerinde
-ayarlandı — yani bu bir **kalibrasyon** sonucu, bağımsız bir doğrulama değil.
-Örneklem küçük: 0/15 yanlış-pozitif, gerçek yanlış-pozitif oranının sıfır
-olduğu anlamına gelmiyor — Wilson %95 güven aralığı üst sınırı kabaca %20
-civarına çıkıyor. Tek bir "accuracy" rakamı bilinçli olarak raporlanmıyor:
-motor üç sınıf üretirken ground truth ikili; orta bant abstention olarak
-raporlanıyor, ki SOC bağlamında bu hata değil doğru davranış.
+Tek bir "accuracy" rakamı bilinçli olarak raporlanmıyor: motor üç sınıf
+üretirken ground truth ikili, ve orta bant abstention — SOC bağlamında hata
+değil doğru davranış.
+
+#### Yanlış-pozitif oranı "%0.0"dan %12.3'e nasıl geldi
+
+Bu README'nin önceki sürümü **%0.0 yanlış-pozitif** raporluyordu. O rakam 15
+meşru mail üzerinde ölçülmüştü ve yanlıştı — hatalı hesaplanmış değil, o
+örneklem boyutunda anlamsız. Sessizce değiştirmek yerine burada anlatılıyor,
+çünkü nasıl çürüdüğü daha faydalı bir sonuç.
+
+O zamanki uyarı, Wilson %95 üst sınırının ~%20 olduğuydu. Meşru tarafı 65
+elle etiketlenmiş maile çıkarmak gerçek değeri **%26.2** gösterdi — o sınırın
+bile üstünde.
+
+Yanlış işaretlenenler sıradan mailler değildi: `google.com`,
+`email.openai.com`, `discord.com`, `client.louisvuitton.com`,
+`tr-info.adidas.com`. On yedinin on altısında SPF, DKIM ve DMARC hepsi
+geçiyordu ve DKIM domain'i uyumluydu. İşaretlenme sebepleri şuydu:
+doğrulanmış göndereni ödüllendiren tek sinyal
+(`all_auth_pass_and_consistent`, −3) Return-Path'in From ile eşleşmesini de
+şart koşuyordu — ve ESP kullanan her gönderen bounce'ları sağlayıcının
+domain'i üzerinden yönlendirir. Meşru toplu mail bu bonusu **tanım gereği**
+kazanamıyordu.
+
+İki düzeltme oranı %12.3'e indirdi: o bonustan Return-Path şartını kaldırmak,
+ve *geçerli* ama yanlış domain'e ait DKIM imzası için yeni bir sinyal eklemek
+(üçüncü taraf spoofing — "DKIM eksik veya başarısız" kuralının hiç
+kapsamadığı durum).
+
+**İkisi de ayrı bir 60 maillik dev set üzerinde kalibre edildi, hold-out
+üzerinde DEĞİL.** Hold-out'a göre ayarlamak onu bir eğitim setine çevirirdi.
+Dev set %10.0, hold-out %12.3 çıktı — birbirine yeterince yakın, yani tek bir
+örnekleme uydurma değil gerçek bir iyileşme.
+
+#### Rakamlar hâlâ ne, ne değil
+
+Ağırlıklar ve eşikler başlangıçta ilk 30 mail üzerinde ayarlandı, o yüzden
+onlar **kalibrasyon** sonucu olmaya devam ediyor. Sonradan eklenen 50 meşru
+mail hiç ayar için kullanılmadı — bu da yanlış-pozitif rakamını buradaki en
+bağımsız ölçüme yaklaştırıyor. Recall hâlâ ilk 15 phishing maili üzerinde
+ölçülüyor ve buna karşılık gelen geniş bir güven aralığı taşıyor.
 
 ### LoRA fine-tuning (rapor yazıcı)
 
@@ -155,25 +196,32 @@ schemas/
   facts.py              EmailFacts — parser'ın çıktı sözleşmesi
   report.py             Report — LLM'in çıktı sözleşmesi
 src/
+  demo.py               .eml girdi → HTML rapor, tek komut
+  web.py                aynı hat, tarayıcı arayüzünün arkasında
+  web_ui.html           arayüzün kendisi (tek sayfa, build adımı yok)
+  router.py             bu girdi hattın işleyebileceği bir şey mi?
+  intent.py             router'ın çözemediği düz metin için persona seçici
   parser/               deterministik özellik çıkarımı
     headers.py            SPF/DKIM/DMARC, adres tutarlılığı, marka adları
     urls.py               text/href uyumsuzluğu, IP tabanlı, punycode
     attachments.py        riskli ve çift uzantılar, arşivler
-    body.py               gizli metin, sadece görsel gövde, aciliyet kalıpları
+    body.py               gizli metin, sadece görsel gövde, gateway banner'ı
   rules/engine.py       ağırlıklı skorlama → verdict
   teacher/              teacher modelle training verisi üretimi
     generate_training_data.py
     prepare_lora_data.py
   eval/
     baseline.py           fine-tune edilmemiş ölçüm
+    finetuned.py          fine-tune sonrası karşılaştırma
     groundedness.py       iddia-vs-facts doğrulaması
 scripts/
   anonymize.py          mailbox sahibinin kimliğini redakte eder
   check_anonymization.py doğrulama geçişi
   select_holdout.py     hold-out örnekleme
+  expand_holdout_legitimate.py  hold-out'u sadece ekleyerek büyütme
 templates/
   report.html.j2        Jinja2 → HTML rapor
-tests/                  78 birim testi
+tests/                  103 birim testi
 ```
 
 ---
@@ -207,7 +255,52 @@ cp .env.anonymize.example .env.anonymize
 `.env.anonymize` gitignore'da. Dosya yoksa hat güvenli şekilde bozuluyor:
 korpusu bozmak yerine hiçbir kişisel ismi redakte etmiyor.
 
-### Çalıştırma
+### Bir e-postayı analiz etme
+
+```bash
+# tam hat: parse → kurallar → Seneca raporu yazar → HTML  (~100 sn)
+python3 src/demo.py mail.eml --open
+
+# aynı verdict, aynı skor, aynı bulgular — metin mekanik üretilir  (~1 sn)
+python3 src/demo.py mail.eml --no-llm --open
+```
+
+`--no-llm`, yeni bir maili, template'i ya da hattı hızlıca kontrol etmek için
+doğru mod: yalnızca ifade değişir, karar asla.
+
+İki bayrak daha:
+
+- `--adapter 0000400` LoRA adapter'ını Seneca'nın üstüne takar. Varsayılan
+  kapalı — her iki metrikte de daha kötü ölçüldü.
+- `--constrain` üretimi `llguidance` ile rapor şemasına kısıtlar, bozuk
+  JSON'u yapısal olarak imkânsız kılar. O da varsayılan kapalı: buradaki
+  bütün rakamlar kısıtsız ölçüldü, demo'nun farklı koşulda çalışması ikisini
+  de yanlış tanıtırdı. Modelin string içinde ısrarla kaçışsız tırnak ürettiği
+  ve JSON'un bir türlü ayrıştırılamadığı maillerde işe yarıyor.
+
+### Tarayıcı arayüzü
+
+```bash
+python3 src/web.py          # http://127.0.0.1:8000
+```
+
+Ham maili yapıştırın ya da `.eml` dosyasını sürükleyin. Yönlendirme kararını,
+kural motorunun verdict'ini (tetiklenen her sinyal ve ağırlığıyla) ve
+render edilmiş raporu gösterir. LLM ve şema kısıtı anahtarları CLI
+bayraklarının karşılığı.
+
+Web katmanında hiçbir analiz mantığı yok — CLI ile aynı router, parser, kural
+motoru ve template'i çağırıyor.
+
+### Yönlendirme
+
+```bash
+python3 src/router.py mail.eml              # hat bunu alabilir mi?
+python3 src/router.py --text "$(pbpaste)"   # yapıştırılmış mail
+python3 src/router.py --text "SPF nedir?" --classify   # + niyet sınıflandırıcı
+```
+
+### Bakım
 
 ```bash
 # birim testleri
@@ -254,19 +347,30 @@ değil — ağır swap'in göstergesi.
 
 ## Bilinen sınırlamalar
 
-- Hold-out seti 30 mail. Ondan türeyen her metrik geniş bir güven aralığı
+- **Recall 15 phishing maile dayanıyor.** Meşru taraf 65'e çıkarıldı ama
+  phishing tarafı çıkarılmadı — büyütmek düşmanca örnekleri elle etiketlemeyi
+  gerektiriyor, çünkü korpusun tahminen ~%43'ü salt ticari spam ve kaynak
+  klasörü etiket olarak güvenilir değil. %86.7 bu yüzden geniş bir aralık
   taşıyor.
-- Kural motoru eşikleri aynı hold-out üzerinde kalibre edildi, dolayısıyla o
-  rakamlar bağımsız doğrulama değil kalibrasyon sonucu.
-- Phishing korpusunun tahminen ~%43'ü salt ticari spam (marka taklidi, kimlik
-  bilgisi talebi veya sahte aciliyet içermeyen) — heuristic bir denetime göre.
-  Bu bir tahmin, doğrulanmış ground truth değil.
+- Ağırlıklar ve eşikler başlangıçta ilk 30 mail üzerinde kalibre edildi, o
+  rakamlar kalibrasyon sonucu olmaya devam ediyor. Sonraki düzeltmeler ayrı
+  bir dev sette ayarlandı (yukarıya bakın).
+- **Motor zarfı okuyor, mektubu değil.** 22 sinyalinin 19'u header, URL ya da
+  ek dosyaya bakıyor. Kimlik doğrulaması temiz, linki ve eki olmayan bir mail,
+  metni ne kadar açık şekilde dolandırıcı olursa olsun motora görünmez. Bilinen
+  iki kaçak tam olarak bu: gerçek altyapıdan forward edilmiş, SPF/DKIM/DMARC
+  hepsi pass Portekizce hukuki-tehdit sosyal mühendisliği; ve gerçek bir
+  `.edu.tr` hesabından gönderilmiş 419 avans-ücreti dolandırıcılığı. İkincisi
+  `reply_to_free_mail` sinyaliyle (kurumsal gönderen, cevaplar ücretsiz posta
+  kutusuna yönlendirilmiş) kısmen kurtarıldı — ama yalnızca cevabı yönlendiren
+  alt kümesi.
 - 229 training örneğinin 9'u (%3.9) 4096 token sınırını aşıyor ve hedef JSON'u
   kesiliyor.
-- Hold-out'ta bilinen 2 kaçırılmış phishing var. Biri Portekizce hukuki-tehdit
-  sosyal mühendisliği, gerçek altyapıdan forward edilmiş ve SPF, DKIM, DMARC
-  hepsi pass — header sinyalleriyle yakalanamaz.
 - Fine-tune edilen adapter overfit etti; sonuçlar bölümüne bakın.
+- **Router yalnızca 1. aşama.** "Bu bir e-posta mı?" sorusunu yapıdan
+  cevaplıyor. Arkasındaki niyet sınıflandırıcı (`--classify`) `titus` ya da
+  `cybersec_qa` adını verebiliyor, ama ikisi de bu repoda kurulmadı —
+  yönlendiriyormuş gibi yapmak yerine bunu söylüyor.
 
 ---
 

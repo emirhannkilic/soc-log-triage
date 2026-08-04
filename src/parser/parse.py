@@ -4,12 +4,12 @@ urls.py, attachments.py, body.py per v3 plan section 4.
 """
 import email
 from email import policy
-from email.header import decode_header
 from pathlib import Path
 
 from src.parser.attachments import extract_attachment_facts
 from src.parser.body import extract_body_facts, get_body
 from src.parser.headers import (
+    _decode_rfc2047,
     parse_address_facts,
     parse_authentication_results,
     parse_routing_facts,
@@ -18,25 +18,10 @@ from src.parser.urls import extract_url_facts
 from schemas.facts import AttachmentFacts, EmailFacts, UrlFacts
 
 
-def _decode_mime_header(raw_value) -> str | None:
-    """Decodes RFC 2047 encoded-words (=?UTF-8?B?...?=) in a header value,
-    e.g. Subject. Compat32 sometimes hands back an email.header.Header
-    object instead of a plain str for malformed headers, so this coerces
-    to str first. Falls back to that raw string on any decode failure —
-    better to show something than to raise on a malformed header."""
-    if raw_value is None:
-        return None
-    raw_str = str(raw_value)
-    try:
-        parts = decode_header(raw_str)
-        decoded = "".join(
-            chunk.decode(charset or "utf-8", errors="replace")
-            if isinstance(chunk, bytes) else chunk
-            for chunk, charset in parts
-        )
-        return decoded
-    except Exception:
-        return raw_str
+# Single implementation lives in headers.py — display-name decoding needs it
+# too, and headers.py cannot import from here (this module already imports
+# that one, so the reverse direction would be a cycle).
+_decode_mime_header = _decode_rfc2047
 
 
 def parse_eml(path: Path) -> EmailFacts:

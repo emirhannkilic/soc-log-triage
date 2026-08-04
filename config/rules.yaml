@@ -28,9 +28,49 @@ signals:
     weight: 2
     description: "DKIM yok/fail VE dkim_domain from_domain ile uyuşmuyor"
 
+  # 2026-08-04'te eklendi. Yukarıdaki kural yalnızca DKIM'in EKSİK ya da
+  # BAŞARISIZ olduğu durumu kapsıyordu; imzanın GEÇERLİ ama yanlış domain'e
+  # ait olduğu durum tamamen kaçıyordu. Oysa üçüncü taraf spoofing'i tam
+  # olarak böyle görünür: saldırgan kendi kontrolündeki domain'le imzalar,
+  # From başlığı başkasını iddia eder.
+  # Bulunduğu örnek (`sample-8611`): DKIM `ladelanoagency.com` imzalamış,
+  # From `jwgmedia.com`, Reply-To ise alakasız bir emlak sitesi —
+  # skor 2 ile "Güvenilir" çıkıyordu.
+  # Ağırlık +3: `spf_or_dmarc_fail` ile aynı sınıf, çünkü ikisi de
+  # "gönderen iddia ettiği kişi değil" diyor. Dev sette (60 meşru mail)
+  # 1 kez tetiklendi — temiz sinyal.
+  dkim_pass_but_domain_mismatch:
+    weight: 3
+    description: "DKIM imzası geçerli AMA imzalayan domain from_domain değil (üçüncü taraf spoofing)"
+
   return_path_mismatch:
     weight: 2
     description: "Return-Path domain != From domain"
+
+  # 2026-08-04'te eklendi. Ham `reply_to_mismatch` sinyali tek başına
+  # kullanılamadı — 80 maillik hold-out'ta phishing'in %40'ında ama meşru
+  # mailin de %25'inde tetikleniyor (birçok gerçek gönderen cevapları
+  # başka adrese yönlendirir). "VE cevap adresi ücretsiz bir posta
+  # sağlayıcısı" koşuluyla daraltılınca temizleniyor:
+  # **3/15 phishing, 0/65 legitimate, 0/60 dev set.**
+  #
+  # Yakaladığı kalıp: kurumsal/kurumsal görünümlü bir domain'den gelip
+  # cevabı gmail/yahoo gibi bir kutuya yönlendirmek — 419 avans ücreti
+  # dolandırıcılığının ve BEC saldırılarının imzası. Gönderen güvenilir
+  # bir domain'e sahip (ya da ele geçirmiş) ama konuşmanın gerçekten
+  # kontrol ettiği yerde sürmesini istiyor.
+  #
+  # Bulunduğu örnek (`bagis.eml`): `firat.edu.tr`'den gönderilmiş,
+  # SPF+DKIM pass, DKIM domain'i uyumlu, sıfır URL, sıfır ek — yani
+  # motorun baktığı her teknik sinyal temiz. Reply-To ise gmail.com.
+  # Skor 1 ile "Güvenilir" çıkıyordu.
+  #
+  # Ağırlık +3: tek başına kararı orta banda taşıyacak kadar güçlü ama
+  # Phishing eşiğine (5) tek başına ulaşmıyor — ikinci bir sinyal
+  # gerekiyor, ki 419 mailleri genelde aciliyet dili de taşıyor.
+  reply_to_free_mail:
+    weight: 3
+    description: "Reply-To ücretsiz bir posta sağlayıcısında, From ise değil (419/BEC kalıbı)"
 
   display_name_brand_mismatch:
     weight: 3
@@ -47,6 +87,66 @@ signals:
   url_punycode:
     weight: 3
     description: "Herhangi bir URL punycode domain kullanıyor"
+
+  # 2026-08-04'te eklendi. Parser bu sinyali (is_shortener) Adım 2'den beri
+  # çıkarıyordu ama kural motorunda karşılığı yoktu — gerçek bir phishing
+  # örneğinde (rebrand.ly üzerinden marka taklidi) fark edildi.
+  #
+  # Ağırlık +2, ve bu seçim hold-out'a BAKILARAK yapılmadı: sinyal 30 mailde
+  # 2 phishing / 0 legitimate tetikliyor ama her ikisi de zaten Phishing
+  # olarak doğru sınıflanmış, yani +1/+2/+3'ün hiçbiri tek bir kararı bile
+  # değiştirmiyor (recall %86.7, FP %0.0, abstention %23.3 üçünde de aynı).
+  # Ağırlık gerekçesi mantıksal: kısaltıcı gerçek hedefi gizler ama meşru
+  # pazarlama da kullanır — url_ip_based ile aynı sınıf (+2), şüphe uyandırır
+  # ama tek başına kanıt değil. url_punycode daha ağır (+3) çünkü onun
+  # meşru kullanımı neredeyse yok.
+  url_shortener:
+    weight: 2
+    description: "Herhangi bir URL link kısaltıcı kullanıyor (gerçek hedef gizli)"
+
+  # --- 2026-08-04'te eklenen üç sinyal ------------------------------------
+  # Ortak durum: parser bu alanları Adım 2'den beri çıkarıyordu ama kural
+  # motorunda karşılıkları yoktu. ÜÇÜ DE hold-out'un 30 mailinde HİÇ
+  # tetiklenmiyor (0/15 phishing, 0/15 legitimate) — yani eklenmeleri
+  # kalibrasyonu değiştiremez, bu matematiksel bir garanti, tahmin değil.
+  #
+  # Bu aynı zamanda ağırlıklarının hold-out'a bakarak seçilemeyeceği
+  # anlamına geliyor; gerekçeler aşağıda tek tek, saldırı mekaniğine göre.
+  #
+  # AYNI TURDA DEĞERLENDİRİLİP REDDEDİLENLER (ölçüm sonucu):
+  #   message_id_domain != from_domain → phishing 12/15, legitimate 14/15.
+  #     Meşru maillerde phishing'den DAHA ÇOK tetikleniyor (toplu mail
+  #     altyapıları kendi Message-ID domain'lerini kullanıyor). Ayırt edici
+  #     değil, gürültü.
+  #   reply_to_mismatch → phishing 6/15, legitimate 3/15. Zayıf ayrım,
+  #     yanlış-pozitif riski gerçek. (BEC saldırılarında güçlü bir sinyal
+  #     olduğu biliniyor ama bu örneklemde desteklenmiyor; hold-out
+  #     büyütülürse yeniden bakılmalı.)
+
+  # +3: kurumsal mail neredeyse hiç <form> içermez — meşru gönderenler
+  # kullanıcıyı kendi sitesine yönlendirir. Gövdedeki bir form, kimlik
+  # bilgisini doğrudan mail istemcisinde toplama girişimidir; bu
+  # display_name_brand_mismatch ile aynı ağırlıkta (+3), çünkü ikisi de
+  # tek başına niyet gösteriyor.
+  has_html_form:
+    weight: 3
+    description: "Mail gövdesinde HTML form var (kimlik bilgisi doğrudan mailde toplanıyor)"
+
+  # +2: gelen kutusu display name'i gösterir, gerçek adresi gizler. Display
+  # name'in kendisini bir e-posta adresi yapmak ("destek@banka.com"
+  # <x@evil.ru>) alıcının gördüğü tek şeyi sahteleştirir. return_path_mismatch
+  # ile aynı sınıf (+2): güçlü şüphe, ama tek başına kanıt değil — bazı
+  # otomatik sistemler de böyle gönderir.
+  display_name_has_email:
+    weight: 2
+    description: "Display name'in kendisi bir e-posta adresi — gelen kutusunda gerçek gönderen adresini gizler"
+
+  # +2: açık yönlendirici istismarı — güvenilir bir domain'in ?url= parametresi
+  # üzerinden kötü niyetli hedefe gitmek. url_shortener ile aynı mantık ve aynı
+  # ağırlık: gerçek hedefi gizler, ama meşru pazarlama/analitik de kullanır.
+  url_redirect_param:
+    weight: 2
+    description: "URL'de yönlendirme parametresi var (?url=, ?redirect= — açık yönlendirici istismarı)"
 
   attachment_risky_type:
     weight: 3
@@ -80,9 +180,21 @@ signals:
     weight: 3
     description: "from_domain bir nokta içermiyor (TLD yok) — malformed/rastgele hostname, gerçek bir kurumsal domain olamaz. Hold-out kalibrasyonunda 4/4 örnek phishing çıktı, 0 legitimate (Adım 4)."
 
+  # 2026-08-04: return-path/reply-to şartı KALDIRILDI. Eski tanım bu bonusu
+  # meşru toplu mail için neredeyse ulaşılamaz kılıyordu — ESP kullanan her
+  # gönderen (Mailchimp, SES, perakendecinin kendi platformu) bounce'ları
+  # sağlayıcının domain'i üzerinden yönlendirir, yani `return_path_mismatch`
+  # onların NORMAL hali, bir semptom değil.
+  # Ölçüm (65 elle etiketlenmiş meşru mail): 17 yanlış-pozitifin 16'sında
+  # SPF+DKIM+DMARC hepsi pass ve DKIM domain'i uyumluydu; sadece bu bonus
+  # tetiklenmediği için Phishing çıkıyorlardı.
+  # Gerekçe: gönderenin kendi domain'iyle doğrulanan DKIM imzası güçlü
+  # iddia; envelope return-path bir yönlendirme detayı. Mismatch sinyalleri
+  # kendi başlarına puanlanmaya devam ediyor (+2), sadece artık bu kanıtı
+  # iptal edemiyorlar.
   all_auth_pass_and_consistent:
     weight: -3
-    description: "SPF+DKIM+DMARC hepsi pass VE dkim_domain from_domain ile uyumlu VE return-path/reply-to mismatch yok"
+    description: "SPF+DKIM+DMARC hepsi pass VE dkim_domain from_domain ile uyumlu"
 
 # Not: plan v3'ün başlangıç tablosundaki "Alıcı ile önceki yazışma zinciri
 # (In-Reply-To var) -2" sinyali burada YOK — EmailFacts şemasında

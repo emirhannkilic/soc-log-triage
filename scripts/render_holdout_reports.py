@@ -107,6 +107,7 @@ def main():
             **report.model_dump(),
             subject=facts.subject,
             date=facts.date,
+            facts=facts,
         )
         out_path = OUT_DIR / f"candidate_{i}.html"
         out_path.write_text(html, encoding="utf-8")
