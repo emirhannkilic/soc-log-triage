@@ -85,7 +85,7 @@ def test_address_facts_no_mismatch_when_domains_match():
 def test_address_facts_brand_display_name_mismatch():
     import email
     msg = email.message_from_string(
-        "From: \"VakifBank Guvenlik\" <no-reply@random-mailer123.xyz>\n\n"
+        "From: \"PayPal Security\" <no-reply@random-mailer123.xyz>\n\n"
     )
     facts = parse_address_facts(msg)
     assert facts["display_name_brand_mismatch"] is True

@@ -5,6 +5,7 @@ domains/IPs/third-party emails are left real as genuine training signal).
 
 Run with: python3 tests/test_anonymize.py
 """
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -12,6 +13,26 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+
+# Pin a FICTIONAL identity before importing anonymize, which reads these at
+# import time. Two reasons this is set here rather than relying on the
+# developer's own `.env.anonymize`:
+#   1. No real personal data belongs in a committed test file.
+#   2. The suite must assert on fixed strings to be meaningful; reading
+#      whoever's identity happens to be configured locally would make the
+#      tests pass or fail depending on the machine.
+# `_load_local_env` never overwrites an already-set variable, so these win.
+TEST_OWN_EMAIL = "test.owner@example.test"
+TEST_OWN_FIRST = "Testcan"
+TEST_OWN_SURNAME = "Ornek"
+os.environ["ANONYMIZE_OWN_EMAIL"] = TEST_OWN_EMAIL
+os.environ["ANONYMIZE_OWN_NAME_VARIANTS"] = (
+    f"{TEST_OWN_FIRST} {TEST_OWN_SURNAME}|{TEST_OWN_FIRST}"
+)
+
+# A different, unrelated person who happens to share the owner's surname —
+# used to prove the bare surname is NOT matched as the owner's identity.
+THIRD_PARTY_NAME = f"Baskabir {TEST_OWN_SURNAME}"
 
 from anonymize import (
     OWN_EMAIL,
@@ -61,36 +82,38 @@ def test_own_name_redacted_outside_salutation():
     """The literal name-variant matcher must catch leaks the structural
     salutation pattern can't anticipate, e.g. a marketing subject line
     that addresses the user by first name without any salutation marker
-    ("Sende Emirhan" in a Turkish e-commerce push, not "Dear Emirhan,")."""
-    text = "Yeni sezon indirimleri seni bekliyor, Sende Emirhan olabilirsin!"
+    ("Sende <name>" in a Turkish e-commerce push, not "Dear <name>,")."""
+    text = f"Yeni sezon indirimleri seni bekliyor, Sende {TEST_OWN_FIRST} olabilirsin!"
     result = redact_own_name_in_text(text)
-    assert "Emirhan" not in result
+    assert TEST_OWN_FIRST not in result
     assert OWN_NAME_ALIAS in result
 
 
 def test_own_full_name_redacted():
-    text = "Emirhan Kılıç adına oluşturulan hesap onaylandı."
+    text = f"{TEST_OWN_FIRST} {TEST_OWN_SURNAME} adına oluşturulan hesap onaylandı."
     result = redact_own_name_in_text(text)
-    assert "Emirhan" not in result
-    assert "Kılıç" not in result
+    assert TEST_OWN_FIRST not in result
+    assert TEST_OWN_SURNAME not in result
 
 
 def test_third_party_sharing_surname_not_matched_by_own_name_regex():
-    """'Kılıç' is a common Turkish surname shared by unrelated third
-    parties — the bare surname is deliberately excluded from
-    _OWN_NAME_VARIANTS_RE so a third party like 'Necati Kılıç' isn't
-    misredacted as if they were the account holder. (It's the salutation
-    matcher's job, not this one's, to handle third-party names.)"""
-    text = "Sayın Necati Kılıç, siparişiniz kargoya verildi."
+    """A surname is commonly shared by unrelated third parties, so the bare
+    surname is deliberately excluded from _OWN_NAME_VARIANTS_RE — otherwise
+    a different real person sharing it would be misredacted as if they were
+    the account holder. (Handling third-party names is the salutation
+    matcher's job, not this one's.)"""
+    text = f"Sayın {THIRD_PARTY_NAME}, siparişiniz kargoya verildi."
     result = redact_own_name_in_text(text)
-    assert "Necati Kılıç" in result
+    assert THIRD_PARTY_NAME in result
 
 
 def test_salutation_name_is_consistent():
     with tempfile.TemporaryDirectory() as tmp:
         alias_map = AliasMap(Path(tmp) / "map.json")
-        r1 = anonymize_salutation_names_in_text("Sayın Necati Kılıç, siparişiniz alındı.", alias_map)
-        r2 = anonymize_salutation_names_in_text("Merhaba Necati Kılıç, tekrar hoş geldiniz.", alias_map)
+        r1 = anonymize_salutation_names_in_text(
+            f"Sayın {THIRD_PARTY_NAME}, siparişiniz alındı.", alias_map)
+        r2 = anonymize_salutation_names_in_text(
+            f"Merhaba {THIRD_PARTY_NAME}, tekrar hoş geldiniz.", alias_map)
         # extract the alias from each and confirm they match
         alias1 = r1.split("Sayın ")[1].split(",")[0]
         alias2 = r2.split("Merhaba ")[1].split(",")[0]
@@ -100,19 +123,20 @@ def test_salutation_name_is_consistent():
 def test_salutation_name_removed_from_output():
     with tempfile.TemporaryDirectory() as tmp:
         alias_map = AliasMap(Path(tmp) / "map.json")
-        result = anonymize_salutation_names_in_text("Hi Emirhan, thanks for registering.", alias_map)
-        assert "Emirhan" not in result
+        result = anonymize_salutation_names_in_text(
+            f"Hi {TEST_OWN_FIRST}, thanks for registering.", alias_map)
+        assert TEST_OWN_FIRST not in result
 
 
 def test_map_persists_across_instances():
     with tempfile.TemporaryDirectory() as tmp:
         map_path = Path(tmp) / "map.json"
         m1 = AliasMap(map_path)
-        alias = m1.name("Necati Kılıç")
+        alias = m1.name(THIRD_PARTY_NAME)
         m1.save()
 
         m2 = AliasMap(map_path)
-        assert m2.name("Necati Kılıç") == alias, \
+        assert m2.name(THIRD_PARTY_NAME) == alias, \
             "re-loading the map must reproduce the same alias for a known name"
 
 
@@ -161,26 +185,30 @@ def test_third_party_email_in_url_survives():
 def test_own_identity_url_encoded_in_url_is_redacted():
     """Regression test: tracking/review-request links found in the Gmail
     corpus embed the recipient's email and name as (sometimes doubly)
-    URL-encoded query params, e.g. name=Emirhan%2BK%25C4%25B1l%25C4%25B1%25C3%25A7
-    which double-decodes to 'Emirhan Kılıç'. redact_own_email_in_text /
-    redact_own_name_in_text only match literal substrings and miss this,
-    so anonymize_facts must also catch it at the URL level."""
+    URL-encoded query params — e.g. a `name=` value that only reveals the
+    recipient after being percent-decoded twice. redact_own_email_in_text /
+    redact_own_name_in_text only match literal substrings and miss this, so
+    anonymize_facts must also catch it at the URL level."""
     with tempfile.TemporaryDirectory() as tmp:
         alias_map = AliasMap(Path(tmp) / "map.json")
+        local_part = TEST_OWN_EMAIL.split("@")[0]
+        # Doubly-encoded: '%2540' decodes to '%40', which decodes to '@';
+        # '%2B' decodes to '+' (a space in query-string terms).
+        encoded_email = TEST_OWN_EMAIL.replace("@", "%2540")
         encoded_url = (
-            "https://mailtrack.judgeme.email/CL0/https:%2F%2Fjudge.me"
-            "%2Femails%2Freviews%2Fnew%3Femail=emirrk53%2540gmail.com"
-            "%26name=Emirhan%2BK%25C4%25B1l%25C4%25B1%25C3%25A7"
+            "https://mailtrack.example.test/CL0/https:%2F%2Freviews.example.test"
+            f"%2Femails%2Freviews%2Fnew%3Femail={encoded_email}"
+            f"%26name={TEST_OWN_FIRST}%2B{TEST_OWN_SURNAME}"
         )
         facts = _blank_facts(
             urls=[{"url": encoded_url,
-                   "href_domain": "mailtrack.judgeme.email", "anchor_text_domain": None,
+                   "href_domain": "mailtrack.example.test", "anchor_text_domain": None,
                    "text_href_mismatch": False, "is_ip_based": False, "is_shortener": False,
                    "has_punycode": False, "redirect_param": False}],
         )
         result = anonymize_facts(facts, alias_map)
-        assert "emirrk53" not in result["urls"][0]["url"]
-        assert "Emirhan" not in result["urls"][0]["url"]
+        assert local_part not in result["urls"][0]["url"]
+        assert TEST_OWN_FIRST not in result["urls"][0]["url"]
 
 
 def test_own_email_in_url_is_redacted():

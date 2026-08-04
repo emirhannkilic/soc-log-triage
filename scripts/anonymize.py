@@ -26,10 +26,11 @@ Redacted: the account holder's own email address (OWN_EMAIL below,
 wherever it appears — headers, body_text, subject, URLs) and their own
 name, via two complementary matchers: a literal list of known name
 variants (_OWN_NAME_VARIANTS_RE — catches leaks in any context, e.g. a
-marketing subject line "...Sende Emirhan ⭐" that isn't a salutation at
+marketing subject line that drops the recipient's first name mid-
+sentence, which isn't a salutation at
 all) and a structured-salutation pattern ("Sayın X Y,", "Dear X Y,") that
 also catches THIRD PARTIES' names when the account holder's own mailbox
-addresses someone else by name (e.g. "Sayın Necati Kılıç," in an order
+addresses someone else by name (e.g. "Sayın <third party>," in an order
 confirmation) — a real person's name is personal data regardless of whose
 mailbox it appears in. Attachment filenames are still anonymized — unlike
 domains, a filename like "fatura_ahmet_yilmaz.pdf" can itself carry a real
@@ -54,6 +55,7 @@ not this docstring.
 """
 import argparse
 import json
+import os
 import re
 import urllib.parse
 from pathlib import Path
@@ -61,36 +63,83 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MAP_PATH = PROJECT_ROOT / "data" / "raw" / "gmail" / "anonymization_map.json"
 
-# The account holder's own address — see userEmail in CLAUDE.md context.
-# This is the one email address in the corpus that's genuinely the user's
-# personal identity; every other address (senders, third parties,
-# phishing_pot addresses) is left real.
-OWN_EMAIL = "emirrk53@gmail.com"
 OWN_EMAIL_ALIAS = "user@example.test"
 OWN_NAME_ALIAS = "Ad Soyad 0"
 
-# The account holder's own name, in known variants — a LITERAL list, not
-# general NER. Unlike _SALUTATION_RE (which matches any name in a
-# structured "Sayın X," greeting), this exists because the salutation
-# pattern alone missed real leaks: e.g. "...Sende Emirhan ⭐" in a marketing
-# subject line, which isn't a salutation at all. Matching a small, known,
-# literal set of the user's own name variants carries essentially no false
-# positive risk and catches leaks in contexts a structural pattern can't
-# anticipate — EXCEPT the bare surname "Kılıç", which is a common Turkish
-# surname shared by unrelated third parties (e.g. "Sayın Necati Kılıç," in
-# an order confirmation): matching it alone would misredact a real
-# person's name as if it were the account holder's. So the bare-surname
-# alternative is deliberately excluded; only "Emirhan" and multi-word
-# combinations that include the first name are matched.
+# The account holder's own identity is READ FROM THE ENVIRONMENT, never
+# hardcoded — this file is committed to a public repository, and baking the
+# maintainer's real name and address into it would leak exactly the personal
+# data the rest of this module exists to remove.
+#
+# Configure via a local, gitignored `.env.anonymize` (see
+# `.env.anonymize.example`) or plain environment variables:
+#
+#   ANONYMIZE_OWN_EMAIL="you@example.com"
+#   ANONYMIZE_OWN_NAME_VARIANTS="Firstname Lastname|Firstname|Nickname Lastname"
+#
+# The variants list is a LITERAL alternation, not general NER. Unlike
+# _SALUTATION_RE (which matches any name in a structured "Sayın X,"
+# greeting), it exists because the salutation pattern alone missed real
+# leaks — e.g. a marketing subject line that drops the recipient's first
+# name mid-sentence, which isn't a salutation at all. Matching a small,
+# known, literal set of the account holder's own name variants carries
+# essentially no false-positive risk and catches leaks in contexts a
+# structural pattern can't anticipate.
+#
+# IMPORTANT — do NOT list a bare surname on its own. Surnames are shared by
+# unrelated third parties (an order confirmation addressed to a relative,
+# say), and matching one alone would redact a different real person's name
+# as if it were the account holder's. List only the first name and
+# multi-word combinations that include it.
+
+
+def _load_local_env(path: Path) -> None:
+    """Populate os.environ from a simple KEY=VALUE file, if present.
+
+    Deliberately minimal (no python-dotenv dependency): blank lines and
+    `#` comments are skipped, surrounding quotes are stripped, and existing
+    environment variables always win so an explicit export can override the
+    file.
+    """
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_local_env(PROJECT_ROOT / ".env.anonymize")
+
+OWN_EMAIL = os.environ.get("ANONYMIZE_OWN_EMAIL", "").strip()
+
+_OWN_NAME_VARIANTS = [
+    variant.strip()
+    for variant in os.environ.get("ANONYMIZE_OWN_NAME_VARIANTS", "").split("|")
+    if variant.strip()
+]
+
+# Matches nothing when unconfigured. `(?!)` is a never-satisfiable negative
+# lookahead, so an unset environment degrades to "redact no personal name"
+# rather than to an empty alternation like `\b()\b`, which would match at
+# every word boundary and corrupt the whole corpus.
 _OWN_NAME_VARIANTS_RE = re.compile(
-    r"\b(Emirhan\s+Kılıç|Emirhan|Emir\s+Kılıç)\b"
+    r"\b(" + "|".join(re.escape(v).replace(r"\ ", r"\s+") for v in _OWN_NAME_VARIANTS) + r")\b"
+    if _OWN_NAME_VARIANTS
+    else r"(?!)"
 )
 
 # Structured salutation patterns — deliberately narrow (not general NER).
 # Matches "Sayın Ad Soyad," / "Dear Ad Soyad," / "Hi Ad," etc., where a
 # capitalized 1-3 word run follows a known salutation marker. This catches
-# the concrete leak found in holdout-fix-tasks.md T4 ("Sayın Necati Kılıç"
-# in an order confirmation, "Hi Emirhan" in a WiFi registration) without
+# the concrete leak found in holdout-fix-tasks.md T4 (a third party named
+# in an order-confirmation salutation, and the mailbox owner greeted by
+# first name in a WiFi registration) without
 # attempting to find names anywhere in free-flowing prose, which is what
 # the earlier "no NER available" decision in PROGRESS.md was about.
 #
@@ -162,14 +211,18 @@ def redact_own_email_in_text(text: str) -> str:
     """Only the account holder's own address is replaced — a third party's
     email address appearing in the same text is left real (it's not the
     user's personal data, and it's genuine training signal)."""
+    if not OWN_EMAIL:
+        return text
     return re.sub(re.escape(OWN_EMAIL), OWN_EMAIL_ALIAS, text, flags=re.IGNORECASE)
 
 
 def _contains_own_identity(decoded: str) -> bool:
+    # The OWN_EMAIL guard is load-bearing: an unconfigured (empty) address
+    # would make `"" in decoded` true for every string, so every URL would
+    # be reported as containing the account holder's identity.
     return (
-        OWN_EMAIL.lower() in decoded.lower()
-        or bool(_OWN_NAME_VARIANTS_RE.search(decoded))
-    )
+        bool(OWN_EMAIL) and OWN_EMAIL.lower() in decoded.lower()
+    ) or bool(_OWN_NAME_VARIANTS_RE.search(decoded))
 
 
 def redact_own_identity_in_url(url: str) -> str:
@@ -178,8 +231,8 @@ def redact_own_identity_in_url(url: str) -> str:
     as URL-encoded query params, sometimes double-encoded by a tracking
     redirector wrapping the original link. redact_own_email_in_text and
     redact_own_name_in_text only match literal substrings, so an encoded
-    occurrence (e.g. "name=Emirhan%2BK%25C4%25B1l%25C4%25B1%25C3%25A7",
-    which double-decodes to "Emirhan Kılıç") survives them untouched —
+    occurrence (a `name=` param that only reveals the recipient after two
+    rounds of percent-decoding) survives them untouched —
     found empirically via check_anonymization.py on the Gmail corpus.
     Surgically patching a match back into a multiply-encoded string is
     fragile, and these tracking URLs carry no phishing-detection signal
@@ -207,7 +260,7 @@ def anonymize_salutation_names_in_text(text: str, alias_map: AliasMap) -> str:
     """Replaces person names appearing in structured salutations ("Sayın X
     Y,", "Dear X Y,", "Hi X,") — see _SALUTATION_RE for scope/rationale.
     Note this catches ANY name in a salutation, not just the account
-    holder's — a message addressed to a third party ("Sayın Necati Kılıç")
+    holder's — a message addressed to a third party ("Sayın <third party>")
     still has that name redacted, since a real person's name is personal
     data regardless of whose mailbox the message came from."""
     def replace(match: re.Match) -> str:

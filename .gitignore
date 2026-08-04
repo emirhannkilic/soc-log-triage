@@ -14,6 +14,10 @@ logs/
 # macOS
 .DS_Store
 
+# local identity config for scripts/anonymize.py — real personal data,
+# never committed. The .example template IS committed.
+.env.anonymize
+
 
 # claude
 CLAUDE.md 

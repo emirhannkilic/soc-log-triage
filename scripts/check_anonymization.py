@@ -46,7 +46,9 @@ from anonymize import OWN_EMAIL, _OWN_NAME_VARIANTS_RE, _SALUTATION_RE  # noqa: 
 
 def check_text(text: str, source: str) -> list[str]:
     issues = []
-    if OWN_EMAIL.lower() in text.lower():
+    # Guard against an unconfigured OWN_EMAIL: `"" in text` is always true,
+    # which would report every single record as a leak.
+    if OWN_EMAIL and OWN_EMAIL.lower() in text.lower():
         issues.append(f"{source}: account holder's own email address leaked")
     if _OWN_NAME_VARIANTS_RE.search(text):
         issues.append(f"{source}: account holder's own name leaked")
