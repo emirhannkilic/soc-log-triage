@@ -1,12 +1,27 @@
 """
-Hand-written few-shot examples for the teacher prompt (v3 plan §6.1: "3
-örnek: 1 phishing, 1 muhtemel, 1 güvenilir, elle yazılmış JSON çıktılarıyla").
+Hand-written few-shot examples for the teacher prompt (v3 plan §6.1).
 
-These 3 hold-out candidates (indices 1, 8, 20 in data/holdout/review.md,
-1-indexed) are EXCLUDED from the Adım 6 smoke-test set precisely because
-they're used here — the teacher must not be shown its own test data as a
-worked example. See scripts/generate_teacher_smoke_test.py for the smoke
-test set (the other 27 candidates, first 20).
+Rewritten 2026-08-05 after 5 prompt-only attempts failed to stop
+sonuc_ve_gerekce/genel_degerlendirme from duplicating each other (see
+PROGRESS.md "rapor bölümlerinin içerik derinliği"). External review
+(Codex) diagnosed that at temperature=0 the model deterministically
+repeats one wrong pattern regardless of instruction wording, and that
+these examples — still in the OLD free-form format — were reinforcing
+exactly the pattern the system prompt was trying to forbid. Rewritten to
+match the new fixed-template rules literally: sonuc_ve_gerekce is one
+sentence naming only categories from the allowed list, genel_degerlendirme
+is exactly three sentences (scenario / expected action / harm) with zero
+technical terms.
+
+Two examples only (rich + poor), per Codex's advice: showing a "wrong"
+example alongside a "right" one risks a small model imitating the wrong
+one's shape, so only positive examples are shown.
+
+Candidate 1 (data/phishing_pot/email/sample-1299.eml) and Candidate 20
+(data/raw/gmail/eml/inbox-748.eml) are indices 1 and 20 in
+data/holdout/review.md (1-indexed) — EXCLUDED from the Adım 6 smoke-test
+set precisely because they're used here. See
+scripts/generate_teacher_smoke_test.py for the smoke test set.
 """
 from schemas.report import Report
 
@@ -14,24 +29,21 @@ from schemas.report import Report
 # Verdict: Phishing (score 7) — dkim_missing_or_fail_domain_mismatch(2),
 # return_path_mismatch(2), credential_request_with_external_link(2),
 # urgency_keywords(1)
+# "Rich" case: multiple independent signal categories fire together.
 FEW_SHOT_PHISHING = Report(
     risk_seviyesi="Phishing",
     sonuc_ve_gerekce=(
-        "Bu e-posta Microsoft hesap güvenliği bildirimi gibi görünse de "
-        "gönderen domain'i (access-accsecurity.com) Microsoft'a ait değil "
-        "ve DKIM doğrulaması yok. Return-Path adresi de From adresinden "
-        "farklı bir domain'e (cumvxope.servifans.com) ait — bu, mailin "
-        "gerçek Microsoft altyapısından gönderilmediğinin güçlü bir "
-        "göstergesi."
+        "Bu karar; kimlik ve marka taklidi, kimlik doğrulama uyumsuzluğu "
+        "ve aciliyet ve baskı kategorilerinin birlikte değerlendirilmesine "
+        "dayanır."
     ),
     genel_degerlendirme=(
-        "E-posta, alıcıyı 'olağandışı oturum açma' iddiasıyla aciliyet "
-        "hissi yaratıp bir linke tıklamaya yönlendiriyor. DKIM "
-        "doğrulaması bulunmuyor ve Return-Path domain'i From adresiyle "
-        "uyuşmuyor, bu da gönderenin kimliğinin taklit edildiğini "
-        "gösteriyor. E-postada bir kimlik doğrulama linki var ve mesaj "
-        "aciliyet dili kullanıyor. Toplamda bu bulgular, hesabı ele "
-        "geçirmeye yönelik bir kimlik avı girişimiyle tutarlı."
+        "Olası senaryo: Microsoft hesap güvenliği bildirimi kılığında "
+        "kimlik bilgisi çalmaya yönelik bir kimlik avı girişimi. "
+        "Alıcıdan beklenen eylem: e-postadaki doğrulama linkine tıklayıp "
+        "hesap bilgilerini girmesi. "
+        "Olası zarar: hesabın ele geçirilmesi ve bu hesap üzerinden "
+        "başka kaynaklara yetkisiz erişim sağlanması."
     ),
     teknik_bulgular=[
         {
@@ -64,74 +76,32 @@ FEW_SHOT_PHISHING = Report(
         },
     ],
     phishing_gostergeleri=[
-        "Gönderen domain'i Microsoft'a ait değil, DKIM doğrulaması yok",
-        "Return-Path domain'i From adresiyle uyuşmuyor",
+        "E-posta example-bank.com benzeri bir Microsoft alan adından "
+        "geliyormuş gibi görünüyor ama DKIM ile doğrulanmış bir imza yok",
+        "Return-Path domain'i (cumvxope.servifans.com) From domain'inden "
+        "(access-accsecurity.com) farklı",
         "Aciliyet hissi yaratan dil ve dış link kombinasyonu",
     ],
     onerilen_aksiyon="E-postayı silin, linke tıklamayın, gönderen adresi engelleyin.",
 )
 
-# Candidate 8: data/phishing_pot/email/sample-2140.eml
-# Verdict: Muhtemel Phishing (score 3) — dkim_missing_or_fail_domain_mismatch(2),
-# urgency_keywords(1)
-FEW_SHOT_MUHTEMEL = Report(
-    risk_seviyesi="Muhtemel Phishing",
-    sonuc_ve_gerekce=(
-        "E-posta Trust Wallet marka adını kullanıyor ve DKIM doğrulaması "
-        "bulunmuyor, ayrıca hesap askıya alınma tehdidiyle aciliyet "
-        "yaratıyor. Ancak From ve Return-Path domain'leri tutarlı "
-        "(support-trustwallet.com) ve URL'lerde belirgin bir marka "
-        "taklidi/domain uyuşmazlığı tespit edilmedi — bu yüzden kesin "
-        "bir phishing kararı için yeterli güçte sinyal yok."
-    ),
-    genel_degerlendirme=(
-        "E-posta 'hesabınız doğrulanmadı, aksi halde askıya alınacak' "
-        "tarzı bir aciliyet mesajı içeriyor ve DKIM imzası yok. Bununla "
-        "birlikte gönderen domain'i ile Return-Path domain'i tutarlı, "
-        "URL'lerde IP tabanlı adres veya punycode gibi güçlü teknik "
-        "sahtekarlık sinyalleri bulunmuyor. Bulgular orta düzeyde "
-        "şüpheli, kesin sınıflandırma için yeterli değil."
-    ),
-    teknik_bulgular=[
-        {
-            "baslik": "DKIM doğrulaması yok",
-            "aciklama": "DKIM sonucu 'none' ve dkim_domain from_domain ile uyuşmuyor.",
-        },
-        {
-            "baslik": "Aciliyet dili",
-            "aciklama": "Mesaj, hesabın askıya alınacağı tehdidiyle acil aksiyon bekletiyor.",
-        },
-    ],
-    phishing_gostergeleri=[
-        "DKIM doğrulaması eksik",
-        "Hesap askıya alma tehdidiyle aciliyet yaratan dil",
-    ],
-    onerilen_aksiyon=(
-        "E-postadaki linklere tıklamadan önce SOC analistine iletin, "
-        "hesabınızı resmi uygulama üzerinden doğrudan kontrol edin."
-    ),
-)
-
 # Candidate 20: data/raw/gmail/eml/inbox-748.eml
 # Verdict: Güvenilir (score 2) — return_path_mismatch(2)
+# "Poor" case: a single, weak, ultimately benign signal — the example the
+# model most needs to see, since it's the one where it's tempted to
+# invent extra findings to fill space.
 FEW_SHOT_GUVENILIR = Report(
     risk_seviyesi="Güvenilir",
     sonuc_ve_gerekce=(
-        "E-posta, Golden Goose marka adına uygun bir domain'den "
-        "(mailer.goldengoose.com) gönderilmiş, DKIM doğrulaması geçiyor "
-        "ve dkim_domain from_domain ile uyumlu. Return-Path domain'i "
-        "(bounce.mailer.goldengoose.com) From domain'inin bir alt "
-        "domain'i olarak görünüyor — bu, kurumsal toplu mail "
-        "altyapılarında (bounce/tracking subdomain'leri) sık görülen, "
-        "zararsız bir yapı."
+        "Bu karar; kimlik doğrulama uyumsuzluğu kategorisinde tek ve "
+        "zayıf bir sinyalin, güçlü kimlik doğrulama sonuçlarıyla birlikte "
+        "değerlendirilmesine dayanır."
     ),
     genel_degerlendirme=(
-        "E-posta bir pazarlama/tanıtım bülteni niteliğinde, kimlik "
-        "bilgisi talebi veya aciliyet dili içermiyor. DKIM doğrulaması "
-        "başarılı ve gönderen domain'i marka adıyla tutarlı. "
-        "Return-Path'in From'dan farklı bir alt domain olması, kurumsal "
-        "mail gönderim servislerinde (bounce/tracking subdomain'i) "
-        "standart bir uygulamadır ve tek başına şüpheli değildir."
+        "Olası senaryo: kurumsal bir pazarlama/tanıtım bülteni, kötü "
+        "niyetli bir senaryo tespit edilmedi. "
+        "Alıcıdan beklenen eylem: Mevcut bulgulardan belirlenemiyor. "
+        "Olası zarar: Mevcut bulgulardan belirlenemiyor."
     ),
     teknik_bulgular=[
         {

@@ -82,11 +82,11 @@ ADAPTER_DIR = PROJECT_ROOT / "models" / "lora_adapters"
 TEMPLATE_PATH = PROJECT_ROOT / "templates" / "report.html.j2"
 CANDIDATES_PATH = PROJECT_ROOT / "data" / "holdout" / "candidates.jsonl"
 
-# The same three hold-out emails used as few-shot examples during teacher
+# The same hold-out emails used as few-shot examples during teacher
 # generation and in both evaluation runs. Keeping them identical here means
 # the demo reproduces the conditions the reported numbers were measured
 # under, rather than a third, unmeasured prompt shape.
-FEW_SHOT_INDICES = (1, 8, 20)
+FEW_SHOT_INDICES = (1, 20)
 METADATA_KEYS = ("source_label", "_eml_path", "is_spam_not_phishing", "spam_reason")
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -116,6 +116,18 @@ def _render(report: Report, facts: EmailFacts, out_path: Path) -> None:
     out_path.write_text(html, encoding="utf-8")
 
 
+def _dump_raw_on_failure(raw: str) -> None:
+    """Diagnostic-only: on invalid/off-schema output, save what the model
+    actually wrote so the failure can be inspected. Not a repair path — the
+    dumped text is never fed back in or parsed differently; CLAUDE.md's
+    "çıktıyı onarma" rule is about not patching output into an accepted
+    report, which this does not do."""
+    path = PROJECT_ROOT / "logs" / "last_llm_failure_raw.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(raw, encoding="utf-8")
+    print(f"      (ham model çıktısı kaydedildi: {path})", file=sys.stderr)
+
+
 def _extract_json(raw_text: str) -> dict | None:
     text = raw_text.strip()
     if text.startswith("```"):
@@ -135,11 +147,10 @@ def _load_few_shot(rules: dict):
     """Rebuild the (facts, verdict, report) triples used as few-shot examples."""
     from src.teacher.few_shot_examples import (
         FEW_SHOT_GUVENILIR,
-        FEW_SHOT_MUHTEMEL,
         FEW_SHOT_PHISHING,
     )
 
-    reports = {1: FEW_SHOT_PHISHING, 8: FEW_SHOT_MUHTEMEL, 20: FEW_SHOT_GUVENILIR}
+    reports = {1: FEW_SHOT_PHISHING, 20: FEW_SHOT_GUVENILIR}
     with open(CANDIDATES_PATH, encoding="utf-8") as f:
         candidates = [json.loads(line) for line in f]
 
@@ -257,6 +268,7 @@ def _report_from_llm(facts: EmailFacts, verdict: Verdict, rules: dict,
 
     parsed = _extract_json(raw)
     if parsed is None:
+        _dump_raw_on_failure(raw)
         raise SystemExit(
             "HATA: model geçerli JSON üretmedi.\n"
             "Bu bilinen bir sınır — çıktı onarılmıyor (bkz. CLAUDE.md "
@@ -266,6 +278,7 @@ def _report_from_llm(facts: EmailFacts, verdict: Verdict, rules: dict,
     try:
         report = Report(**parsed)
     except Exception as e:
+        _dump_raw_on_failure(raw)
         raise SystemExit(f"HATA: model çıktısı rapor şemasına uymuyor: {e}")
 
     # The model must echo the rule engine's decision, never override it.

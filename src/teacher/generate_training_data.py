@@ -49,7 +49,6 @@ from schemas.facts import EmailFacts  # noqa: E402
 from src.rules.engine import evaluate, load_rules  # noqa: E402
 from src.teacher.few_shot_examples import (  # noqa: E402
     FEW_SHOT_GUVENILIR,
-    FEW_SHOT_MUHTEMEL,
     FEW_SHOT_PHISHING,
 )
 from src.teacher.generate import generate_one  # noqa: E402
@@ -73,7 +72,7 @@ DEFAULT_SEED = 7
 
 # candidate index (1-indexed, data/holdout/review.md order) used as
 # hand-written few-shot examples in src/teacher/generate.py's FEW_SHOT_INDICES
-_FEW_SHOT_HOLDOUT_INDICES = {1: FEW_SHOT_PHISHING, 8: FEW_SHOT_MUHTEMEL, 20: FEW_SHOT_GUVENILIR}
+_FEW_SHOT_HOLDOUT_INDICES = {1: FEW_SHOT_PHISHING, 20: FEW_SHOT_GUVENILIR}
 
 
 def _load_facts_pool() -> list[dict]:

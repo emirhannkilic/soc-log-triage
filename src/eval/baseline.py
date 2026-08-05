@@ -48,7 +48,6 @@ from src.eval.groundedness import check_claims  # noqa: E402
 from src.rules.engine import evaluate, load_rules  # noqa: E402
 from src.teacher.few_shot_examples import (  # noqa: E402
     FEW_SHOT_GUVENILIR,
-    FEW_SHOT_MUHTEMEL,
     FEW_SHOT_PHISHING,
 )
 from src.teacher.prompts import build_messages  # noqa: E402
@@ -58,8 +57,8 @@ CANDIDATES_PATH = PROJECT_ROOT / "data" / "holdout" / "candidates.jsonl"
 OUT_PATH = PROJECT_ROOT / "data" / "training" / "baseline_seneca.jsonl"
 
 METADATA_KEYS = ("source_label", "_eml_path", "is_spam_not_phishing", "spam_reason")
-FEW_SHOT_INDICES = {1, 8, 20}
-FEW_SHOT_REPORTS = {1: FEW_SHOT_PHISHING, 8: FEW_SHOT_MUHTEMEL, 20: FEW_SHOT_GUVENILIR}
+FEW_SHOT_INDICES = {1, 20}
+FEW_SHOT_REPORTS = {1: FEW_SHOT_PHISHING, 20: FEW_SHOT_GUVENILIR}
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
