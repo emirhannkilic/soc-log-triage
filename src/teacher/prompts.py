@@ -113,6 +113,14 @@ sayıların (url_count, attachment_count vb.) karşılığıdır — yeni bilgi 
 aynı bulguyu somutlaştırman için verilmiştir.
 - "Güvenilir" kararlarda "phishing_gostergeleri" boş bir liste OLABİLİR ve genellikle \
 OLMALIDIR — her maile zorla bir gösterge uydurma.
+- TUTARLILIK KURALI: "teknik_bulgular" listesindeki HER madde, "sonuc_ve_gerekce" \
+alanındaki kategori listesinde MUTLAKA temsil edilmeli — teknik_bulgular'da \
+bahsettiğin bir sinyali (ör. bir aciliyet ifadesi, bir kimlik doğrulama sorunu) \
+sonuc_ve_gerekce'nin İZİN VERİLEN KURAL KATEGORİLERİ listesinden karşılığı olan \
+kategoriyi SEÇMEDEN bırakma. Bir bulguyu teknik_bulgular'a yazıp sonra onu \
+sonuc_ve_gerekce'de YOKMUŞ gibi davranmak (kategori listesinden atlamak) \
+raporun kendi içinde çelişmesine yol açar — KARAR "Muhtemel Phishing" ya da \
+"Phishing" ise, teknik_bulgular'daki HER maddenin bir kategori karşılığı olmalı.
 - Tüm metin alanları Türkçe olmalı.
 - JSON metin alanlarının İÇİNDE çift tırnak (") KULLANMA. Bir kelimeyi \
 vurgulamak ya da alıntılamak gerekiyorsa tek tırnak kullan: 'böyle'. Çift \
