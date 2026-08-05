@@ -87,6 +87,31 @@ def _domain_of(address) -> str | None:
     return None
 
 
+def _registrable_domain(domain: str) -> str:
+    """Last two labels of a domain, as a cheap stand-in for the registrable
+    (organization) domain — no public-suffix-list lookup, so a two-label
+    ccTLD like "co.uk" is handled wrong (returns "co.uk" from
+    "mail.example.co.uk" instead of "example.co.uk"). Good enough at this
+    project's scale (v3 is a demo, see CLAUDE.md "Kapsam"): the mismatch it
+    can produce is a false organization match on an already-uncommon TLD
+    shape, not a missed phishing signal — a real attacker's domain would
+    still fail this on its own labels, not on the ccTLD parsing quirk."""
+    parts = domain.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else domain
+
+
+def _same_organization(a: str | None, b: str | None) -> bool:
+    """Same domain, or one a subdomain of the same registrable domain as the
+    other (mailer.netflix.com / netflix.com) — the pattern large senders use
+    for bulk-mail infrastructure. Exact-string comparison flagged this as
+    third-party spoofing on a genuine Netflix email (dkim_domain=netflix.com,
+    from_domain=mailer.netflix.com, both real Netflix domains) — see
+    PROGRESS.md "inbox-9945.eml" for the false positive this produced."""
+    if not a or not b:
+        return False
+    return a == b or _registrable_domain(a) == _registrable_domain(b)
+
+
 def parse_authentication_results(msg: Message, from_domain: str | None) -> dict:
     """Returns spf_result, dkim_result, dmarc_result, dkim_domain,
     dkim_domain_matches_from."""
@@ -104,16 +129,18 @@ def parse_authentication_results(msg: Message, from_domain: str | None) -> dict:
     dkim_result = None
     dkim_domain = None
     if dkim_matches:
-        # Prefer the dkim= entry whose signing domain matches From, since
-        # that's the one that actually authenticates the claimed sender.
+        # Prefer the dkim= entry whose signing domain matches From (same
+        # organization, not just an exact string match — see
+        # _same_organization), since that's the one that actually
+        # authenticates the claimed sender.
         matching = [(r, d) for r, d in dkim_matches
-                    if from_domain and d.lower() == from_domain]
+                    if from_domain and _same_organization(d.lower(), from_domain)]
         chosen = matching[0] if matching else dkim_matches[0]
         dkim_result, dkim_domain = chosen[0].lower(), chosen[1].lower()
 
     dkim_domain_matches_from = (
         None if dkim_domain is None or from_domain is None
-        else dkim_domain == from_domain
+        else _same_organization(dkim_domain, from_domain)
     )
 
     return {

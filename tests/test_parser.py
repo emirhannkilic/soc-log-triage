@@ -5,6 +5,7 @@ Run with: python3 -m pytest tests/test_parser.py -v
 (or, without pytest installed: python3 tests/test_parser.py)
 """
 import sys
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -120,6 +121,50 @@ def test_encoded_display_name_matching_own_domain_is_not_flagged():
     )
     facts = parse_address_facts(msg)
     assert facts["display_name_brand_mismatch"] is False
+
+
+def test_unencoded_raw_utf8_display_name_is_not_mangled():
+    """Compat32 decodes a header as Latin-1 by default. A display name that
+    contains raw, UN-encoded multi-byte UTF-8 (no RFC 2047 =?...?= wrapper —
+    e.g. a literal U+2019 apostrophe typed directly into the header) survives
+    RFC 2047 decoding fine (there's nothing to decode) but comes out of
+    Compat32 with every non-ASCII byte replaced by U+FFFD, irreversibly.
+    Regression test for a real sample: 'Men's Wellness Today' (with a
+    right-single-quote apostrophe) rendered as 'Men��s Wellness
+    Today' throughout the report. Needs a real file on disk because the
+    fix re-reads the raw header bytes from the file, not from the
+    already-mangled Message object."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "sample.eml"
+        p.write_bytes((
+            "From: Men’s Wellness Today <deals@example.test>\r\n"
+            "To: user@example.test\r\n"
+            "Subject: Test\r\n"
+            "\r\n"
+            "body\r\n"
+        ).encode("utf-8"))
+
+        facts = parse_eml(p)
+        assert facts.display_name == "Men’s Wellness Today"
+        assert "�" not in facts.display_name
+
+
+def test_header_that_decodes_cleanly_is_left_alone():
+    """A plain ASCII header must not be touched by the UTF-8 re-decode
+    path — only headers Compat32 actually mangled (containing U+FFFD) are
+    re-read."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "sample.eml"
+        p.write_bytes(
+            b"From: Plain Sender <sender@example.test>\r\n"
+            b"To: user@example.test\r\n"
+            b"Subject: Test\r\n"
+            b"\r\n"
+            b"body\r\n"
+        )
+
+        facts = parse_eml(p)
+        assert facts.display_name == "Plain Sender"
 
 
 def test_routing_facts_message_id_domain():
