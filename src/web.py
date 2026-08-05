@@ -185,7 +185,13 @@ async def analyze(
             tmp_path = Path(tmp.name)
         decision = route(file_path=tmp_path)
     else:
-        decision = route(text=text)
+        # use_classifier=True: static rules run first regardless (file
+        # extension / pasted-header detection) and only fall through to the
+        # small model when text matches neither — same behavior as
+        # `router.py --classify`, just always enabled here since a web
+        # submission is already a deliberate, infrequent action (unlike the
+        # CLI router, which runs on every request).
+        decision = route(text=text, use_classifier=True)
 
     routing = {
         "route": decision.route.value,

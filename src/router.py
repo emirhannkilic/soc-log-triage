@@ -138,6 +138,15 @@ def _route_via_classifier(text: str) -> RoutingDecision:
             f"ham halini (header'larıyla birlikte) yapıştırın.",
             "intent_phishing_no_email")
 
+    if r.persona == "alakasiz":
+        return RoutingDecision(
+            Route.UNSUPPORTED,
+            f"{detail} Bu istek siber güvenlikle ilgili görünmüyor. Bu "
+            f"sistemde yalnızca phishing analizi hattı çalışıyor — bir "
+            f"e-posta paylaşırsanız analiz edebilirim."
+            + (f" ({r.fallback_reason})" if r.fallback_reason else ""),
+            "intent_alakasiz")
+
     return RoutingDecision(
         Route.UNSUPPORTED,
         f"{detail} Bu istek '{r.persona}' personasına ait görünüyor, ama o "
