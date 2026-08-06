@@ -5,3 +5,11 @@ pydantic
 beautifulsoup4
 pyyaml
 jinja2
+
+# Shadow-mode phishing classifier (PROGRESS.md "Plan sonrası — çok dilli
+# phishing classifier mekanizması") — never feeds the rule engine, see
+# src/classifier/ module docstrings.
+torch
+transformers
+sentencepiece
+fasttext-wheel
