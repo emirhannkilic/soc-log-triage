@@ -147,6 +147,8 @@ def _load_few_shot(rules: dict):
     """Rebuild the (facts, verdict, report) triples used as few-shot examples."""
     from src.teacher.few_shot_examples import (
         FEW_SHOT_GUVENILIR,
+        FEW_SHOT_MUHTEMEL,
+        FEW_SHOT_MUHTEMEL_EML_PATH,
         FEW_SHOT_PHISHING,
     )
 
@@ -160,6 +162,10 @@ def _load_few_shot(rules: dict):
         fs_facts = EmailFacts(**{k: v for k, v in cand.items() if k not in METADATA_KEYS})
         fs_verdict = evaluate(fs_facts.flat_signals(), rules)
         few_shot.append((fs_facts, fs_verdict, reports[idx]))
+
+    muhtemel_facts = parse_eml(PROJECT_ROOT / FEW_SHOT_MUHTEMEL_EML_PATH)
+    muhtemel_verdict = evaluate(muhtemel_facts.flat_signals(), rules)
+    few_shot.append((muhtemel_facts, muhtemel_verdict, FEW_SHOT_MUHTEMEL))
     return few_shot
 
 
@@ -310,6 +316,12 @@ def main() -> None:
                     help="çıktıyı JSON şemasına kısıtla — geçersiz JSON'u yapısal olarak\n"
                          "imkansız kılar. Varsayılan KAPALI: ölçümler kısıtsız modda\n"
                          "yapıldı, demo da aynı koşulda çalışmalı.")
+    ap.add_argument("--shadow-classify", action="store_true",
+                    help="ealvaradob/bert-finetuned-phishing'i SHADOW MODE'da çalıştırıp\n"
+                         "sonucu stderr'e logla — karara/skora HİÇ karışmaz, sadece gözlem\n"
+                         "içindir (bkz. PROGRESS.md 'shadow mode'). İngilizce olmayan\n"
+                         "mailler facebook/m2m100_418M ile çevrilir; modeller yoksa hata\n"
+                         "verir, indirme komutunu gösterir.")
     args = ap.parse_args()
 
     if not args.eml.is_file():
@@ -335,6 +347,22 @@ def main() -> None:
         print(f"        {sign}{m.weight:>3}  {m.description}", file=sys.stderr)
     if not verdict.matches:
         print("        (hiçbir sinyal tetiklenmedi)", file=sys.stderr)
+
+    if args.shadow_classify:
+        from src.classifier.phishing import classify
+        print("[shadow] ealvaradob/bert-finetuned-phishing çalıştırılıyor "
+              "(karara katılmıyor, sadece gözlem) …", file=sys.stderr)
+        result = classify(facts.subject or "", facts.body_text)
+        if result.usable:
+            print(f"[shadow] dil={result.language} "
+                  f"(güven {result.language_confidence:.2f}), "
+                  f"çevrildi={result.translated}, "
+                  f"ml_phishing_probability={result.phishing_probability:.4f} "
+                  f"| rule_engine_karar={verdict.verdict} skor={verdict.score}",
+                  file=sys.stderr)
+        else:
+            print(f"[shadow] KULLANILAMADI ({result.skip_reason}) "
+                  f"dil={result.language}", file=sys.stderr)
 
     if args.no_llm:
         from render_holdout_reports import build_report

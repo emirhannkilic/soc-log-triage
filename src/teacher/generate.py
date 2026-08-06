@@ -31,9 +31,12 @@ from mlx_vlm.prompt_utils import apply_chat_template  # noqa: E402
 
 from schemas.facts import EmailFacts  # noqa: E402
 from schemas.report import Report  # noqa: E402
+from src.parser.parse import parse_eml  # noqa: E402
 from src.rules.engine import evaluate, load_rules  # noqa: E402
 from src.teacher.few_shot_examples import (  # noqa: E402
     FEW_SHOT_GUVENILIR,
+    FEW_SHOT_MUHTEMEL,
+    FEW_SHOT_MUHTEMEL_EML_PATH,
     FEW_SHOT_PHISHING,
 )
 from src.teacher.prompts import build_messages  # noqa: E402
@@ -152,12 +155,16 @@ def main():
     rules = load_rules()
     candidates = _load_candidates()
 
-    # few-shot examples: rebuild (facts, verdict) for the 3 fixed indices,
-    # pair with their hand-written Report
+    # few-shot examples: rebuild (facts, verdict) for the 2 hold-out
+    # indices, pair with their hand-written Report, plus one non-hold-out
+    # example (FEW_SHOT_MUHTEMEL) parsed directly from its .eml path
     few_shot = []
     for idx in sorted(FEW_SHOT_INDICES):
         facts, verdict = _facts_and_verdict(candidates[idx - 1], rules)
         few_shot.append((facts, verdict, _FEW_SHOT_REPORTS[idx]))
+    muhtemel_facts = parse_eml(PROJECT_ROOT / FEW_SHOT_MUHTEMEL_EML_PATH)
+    few_shot.append(
+        (muhtemel_facts, evaluate(muhtemel_facts.flat_signals(), rules), FEW_SHOT_MUHTEMEL))
 
     if args.indices:
         smoke_test_indices = [int(x) for x in args.indices.split(",")]

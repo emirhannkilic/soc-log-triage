@@ -62,6 +62,19 @@ metinde "güvenilir görünüyor", "zararsız", "sorun yok" gibi ifadeler KULLAN
 KARAR "Güvenilir" ise alarm dili kullanma. Kararı sorgulama, yumuşatma ya da \
 tartışma — o karar deterministik bir kural motorundan geliyor ve senin işin onu \
 AÇIKLAMAK.
+- SANA VERİLEN ÜÇ FEW-SHOT ÖRNEĞİ ÜÇ FARKLI KARARI (Phishing, Güvenilir, \
+Muhtemel Phishing) TEMSİL EDER — her biri SADECE KENDİ KARARININ üslubunu \
+gösterir, bir örneğin CÜMLE KALIBINI başka bir KARAR için kullanma. \
+ÖZELLİKLE: Muhtemel Phishing örneğindeki temkinli/belirsiz dil ("kesin \
+olarak doğrulanamadı ama dışlanamadı da", "tek başına yeterli kanıt \
+değil", "açık bir istismar kanıtı yok" gibi ifadeler) SADECE KARAR \
+"Muhtemel Phishing" olduğunda kullanılır. KARAR "Güvenilir" ise raporun \
+TAMAMI net ve kararlı olmalı — "doğrulanamadı ama dışlanamadı da" gibi \
+şüpheci bir ifade YAZMA, bunun yerine kararı doğrudan destekleyen bir \
+dille yaz (ör. "kötü niyetli bir senaryo tespit edilmedi", NOKTA — \
+belirsizlik ifade eden bir ekleme YAPMA). Aynı şekilde KARAR "Phishing" \
+ise Muhtemel Phishing örneğinin temkinli diliyle YAZMA, doğrudan ve \
+kesin bir dille yaz.
 - "BU KARARI ÜRETEN KURALLAR" listesi raporunun iskeletidir: teknik bulguların o \
 kuralların karşılığı olmalı. Ham bulgulardan kendi başına ters bir sonuç çıkarma \
 (ör. "dkim_result: pass" görüp "DKIM geçerli, demek ki güvenilir" DEME — kural \
@@ -111,6 +124,13 @@ kullan.
 kendisi ya da dosya adı) an. Bu listeler zaten TESPİT EDİLEN BULGULAR'daki \
 sayıların (url_count, attachment_count vb.) karşılığıdır — yeni bilgi değil, \
 aynı bulguyu somutlaştırman için verilmiştir.
+- "urgency_keyword_count" alanı bir sayı verir ama HANGİ kelimenin \
+eşleştiğini söylemez — o bilgi ayrı, ACİLİYET KALIPLARI listesinde. \
+Aciliyet dilinden bahsederken SADECE o listedeki gerçek kelime/bağlamı \
+alıntıla. Konu satırından ya da gövdeden kendi başına "bu da aciliyet \
+ifade ediyor" diye bir cümle/başlık SEÇME (ör. bir etkinlik/mekan adı, \
+bir soru cümlesi aciliyet KANITI DEĞİLDİR, tek başına aciliyet listesinde \
+YOKSA) — ACİLİYET KALIPLARI listesi boşsa aciliyet dilinden HİÇ bahsetme.
 - "Güvenilir" kararlarda "phishing_gostergeleri" boş bir liste OLABİLİR ve genellikle \
 OLMALIDIR — her maile zorla bir gösterge uydurma.
 - TUTARLILIK KURALI: "teknik_bulgular" listesindeki HER madde, "sonuc_ve_gerekce" \
@@ -159,7 +179,32 @@ Domain, DKIM, SPF, DMARC, Return-Path, header, link sayısı, kural adı gibi \
 HİÇBİR teknik terim burada YAZILMAZ. Bir köşeli parantezin cevabı GÖVDE \
 metninden ya da TESPİT EDİLEN BULGULAR'dan çıkarılamıyorsa oraya "Mevcut \
 bulgulardan belirlenemiyor" yaz — boşluğu teknik bulguları tekrarlayarak \
-DOLDURMA.
+DOLDURMA. \
+"Alıcıdan beklenen eylem" SADECE e-postanın KENDİSİNİN alıcıdan ne \
+yapmasını İSTEDİĞİNİ anlatır — yani gönderenin/saldırganın senaryosu \
+içinde alıcının yapması beklenen şey (ör. "bir linke tıklayıp giriş \
+bilgilerini girmesi", "bir bilet satın alması", "bir eki açması"). BU ALAN \
+ASLA bir SOC/güvenlik önerisi, "silin", "tıklamayın", "engelleyin" gibi \
+BİR SAVUNMA AKSİYONU İÇEREMEZ — o "onerilen_aksiyon" alanının işi, burada \
+TEKRARLANMAZ. Bu iki alanı KARIŞTIRMA: "genel_degerlendirme" saldırganın \
+SENARYOSUNU anlatır, "onerilen_aksiyon" SOC'un YANITINI anlatır — biri \
+mailin içindeki kurgu, diğeri mailin dışındaki savunma tepkisi.
+- "onerilen_aksiyon": SEN bu e-postanın ne kadar tehlikeli olduğuna karar \
+VERMİYORSUN, bu karar zaten "risk_seviyesi" ile SANA VERİLDİ — aksiyon \
+önerin SADECE "risk_seviyesi"nin karşılığı olmalı, kendi bağımsız risk \
+değerlendirmenden TÜRETİLMEMELİ. "risk_seviyesi" == "Phishing" ise aksiyon \
+KESİN ve NET olmalı (ör. "E-postayı silin, hiçbir bağlantıya tıklamayın \
+veya eki açmayın, gönderen adresi engelleyin."). "risk_seviyesi" == \
+"Muhtemel Phishing" ise aksiyon bir SOC analistine yönlendirme olmalı, \
+KESİN bir "silin"/"tıklamayın" talimatı DEĞİL — bu bant sistemin karar \
+VEREMEDİĞİ, insana bırakıldığı anlamına gelir (ör. "Otomatik karar \
+verilemedi, bir SOC analisti gönderen ve bağlantıları manuel olarak \
+incelemeden e-postayla etkileşime girilmemesi önerilir."). \
+"risk_seviyesi" == "Güvenilir" ise aksiyon nötr olmalı (ör. "Ek bir aksiyon \
+gerekmiyor." veya standart bir dikkat hatırlatması). "Muhtemel Phishing" \
+kararında "silin", "engelleyin", "asla tıklamayın" gibi KESİN ve ALARM \
+dilinde ifadeler YASAK — bu, sistemin vermediği bir kararı senin verdiğin \
+anlamına gelir.
 
 İZİN VERİLEN KURAL KATEGORİLERİ (sadece bu listeden seç, başka kategori \
 UYDURMA):
@@ -177,7 +222,7 @@ JSON şeması:
   "genel_degerlendirme": "TAM OLARAK 3 cümle, sabit kalıp (yukarıya bak), teknik terim YASAK",
   "teknik_bulgular": [{"baslik": "...", "aciklama": "ne olduğu + neden önemli olduğu, 2 cümle"}],
   "phishing_gostergeleri": ["...", "..."],
-  "onerilen_aksiyon": "1-2 cümle"
+  "onerilen_aksiyon": "1-2 cümle, risk_seviyesi ile TUTARLI (yukarıya bak) — Muhtemel Phishing'de KESİN 'silin' talimatı YASAK"
 }
 
 HATIRLATMA: "Ad Soyad N" bir anonimleştirme maskesidir, gerçek içerik değildir — \
@@ -232,6 +277,24 @@ def _attachment_block(facts: EmailFacts) -> str:
     )
 
 
+def _urgency_block(facts: EmailFacts) -> str:
+    # Same reasoning as _url_block: flat_signals() only exposes
+    # urgency_keyword_count (a number), never which word matched or where.
+    # Without the actual quote, the model has to invent one — on a real
+    # sample (inbox-7348.eml, subject "Aşk Biter mi? Zorlu PSM'de") the
+    # only real match was the keyword "hemen" in "Hemen Biletini Al", but
+    # the model reported the subject's "Aşk Biter mi?" and "Zorlu PSM" —
+    # neither of which is an urgency phrase — as its evidence instead of
+    # citing the real one it had. Giving it the actual keyword+context
+    # closes that gap the same way BAĞLANTILAR/EKLER did for URLs/ekler.
+    if not facts.urgency_keywords:
+        return "  (yok)"
+    return "\n".join(
+        f"  - '{m.keyword}' — bağlam: \"{m.context}\""
+        for m in facts.urgency_keywords
+    )
+
+
 def build_user_prompt(facts: EmailFacts, verdict: Verdict) -> str:
     signals = facts.flat_signals()
     findings = _nonempty_signals(signals)
@@ -268,6 +331,11 @@ BAĞLANTILAR (varsa, teknik bulgularda ismen atıfta bulun):
 
 EKLER (varsa, teknik bulgularda ismen atıfta bulun):
 {_attachment_block(facts)}
+
+ACİLİYET KALIPLARI (varsa, SADECE burada gerçekten listelenen kelime/bağlamı \
+alıntıla — konu veya gövdeden kendi seçtiğin başka bir ifadeyi aciliyet kanıtı \
+diye SUNMA):
+{_urgency_block(facts)}
 
 E-POSTA KONUSU: {facts.subject or "(konu yok)"}
 GÖVDE (ilk 2000 karakter): {facts.body_text[:2000]}"""

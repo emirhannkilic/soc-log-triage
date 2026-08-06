@@ -46,9 +46,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from mlx_vlm import load  # noqa: E402
 
 from schemas.facts import EmailFacts  # noqa: E402
+from src.parser.parse import parse_eml  # noqa: E402
 from src.rules.engine import evaluate, load_rules  # noqa: E402
 from src.teacher.few_shot_examples import (  # noqa: E402
     FEW_SHOT_GUVENILIR,
+    FEW_SHOT_MUHTEMEL,
+    FEW_SHOT_MUHTEMEL_EML_PATH,
     FEW_SHOT_PHISHING,
 )
 from src.teacher.generate import generate_one  # noqa: E402
@@ -166,6 +169,9 @@ def main():
         facts = EmailFacts(**facts_dict)
         verdict = evaluate(facts.flat_signals(), rules)
         few_shot.append((facts, verdict, report))
+    muhtemel_facts = parse_eml(PROJECT_ROOT / FEW_SHOT_MUHTEMEL_EML_PATH)
+    few_shot.append(
+        (muhtemel_facts, evaluate(muhtemel_facts.flat_signals(), rules), FEW_SHOT_MUHTEMEL))
 
     print(f"Loading model from {MODEL_PATH} ...", file=sys.stderr)
     model, processor = load(str(MODEL_PATH))

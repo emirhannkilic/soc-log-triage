@@ -68,9 +68,12 @@ from mlx_lm import generate, load  # noqa: E402
 from schemas.facts import EmailFacts  # noqa: E402
 from schemas.report import Report  # noqa: E402
 from src.eval.groundedness import check_claims  # noqa: E402
+from src.parser.parse import parse_eml  # noqa: E402
 from src.rules.engine import evaluate, load_rules  # noqa: E402
 from src.teacher.few_shot_examples import (  # noqa: E402
     FEW_SHOT_GUVENILIR,
+    FEW_SHOT_MUHTEMEL,
+    FEW_SHOT_MUHTEMEL_EML_PATH,
     FEW_SHOT_PHISHING,
 )
 from src.teacher.prompts import build_messages  # noqa: E402
@@ -265,6 +268,9 @@ def main():
     for idx in sorted(FEW_SHOT_INDICES):
         facts, verdict = _facts_and_verdict(candidates[idx - 1], rules)
         few_shot_examples.append((facts, verdict, FEW_SHOT_REPORTS[idx]))
+    muhtemel_facts = parse_eml(PROJECT_ROOT / FEW_SHOT_MUHTEMEL_EML_PATH)
+    few_shot_examples.append(
+        (muhtemel_facts, evaluate(muhtemel_facts.flat_signals(), rules), FEW_SHOT_MUHTEMEL))
 
     eval_indices = [i for i in range(1, len(candidates) + 1) if i not in FEW_SHOT_INDICES]
     OUT_DIR.mkdir(parents=True, exist_ok=True)
