@@ -5,6 +5,9 @@ pydantic
 beautifulsoup4
 pyyaml
 jinja2
+tldextract
+opencv-python
+pillow
 
 # Shadow-mode phishing classifier (PROGRESS.md "Plan sonrası — çok dilli
 # phishing classifier mekanizması") — never feeds the rule engine, see

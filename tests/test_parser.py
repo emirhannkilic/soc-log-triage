@@ -37,6 +37,46 @@ def test_authentication_results_all_pass():
     assert facts["dmarc_result"] == "pass"
     assert facts["dkim_domain"] == "bank.com"
     assert facts["dkim_domain_matches_from"] is True
+    assert facts["spf_mailfrom_domain"] == "bank.com"
+    assert facts["spf_aligned"] is True
+
+
+def test_spf_mailfrom_misaligned_with_from():
+    """The SPF-alignment gap: spf=pass only vouches for the ENVELOPE
+    domain's own record, not the visible From. A rented domain with a
+    valid SPF record passes trivially while claiming an unrelated From."""
+    import email
+    msg = email.message_from_string(
+        "From: security@bank.com\n"
+        "Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=rented-evil.tld; "
+        "dkim=none; dmarc=fail\n\n"
+    )
+    facts = parse_authentication_results(msg, "bank.com")
+    assert facts["spf_result"] == "pass"
+    assert facts["spf_mailfrom_domain"] == "rented-evil.tld"
+    assert facts["spf_aligned"] is False
+
+
+def test_spf_mailfrom_bare_domain_not_address():
+    """smtp.mailfrom is sometimes a bare domain (no '@'), not a full
+    address — _domain_of_mailfrom_value must not silently return None for
+    that shape."""
+    import email
+    msg = email.message_from_string(
+        "From: alerts@mg.tdi.tc\n"
+        "Authentication-Results: mx.example.com; spf=none smtp.mailfrom=mg.tdi.tc; "
+        "dkim=fail\n\n"
+    )
+    facts = parse_authentication_results(msg, "mg.tdi.tc")
+    assert facts["spf_mailfrom_domain"] == "mg.tdi.tc"
+
+
+def test_spf_mailfrom_missing_is_none():
+    import email
+    msg = email.message_from_string("From: a@b.com\n\n")
+    facts = parse_authentication_results(msg, "b.com")
+    assert facts["spf_mailfrom_domain"] is None
+    assert facts["spf_aligned"] is None
 
 
 def test_authentication_results_missing_header_is_none():
@@ -379,6 +419,33 @@ def test_no_credential_request_in_normal_text():
     assert facts["credential_request"] is False
 
 
+def test_credential_request_verb_and_target_far_apart_not_flagged():
+    """Rule Engine v2 credential-context-window fix (Codex'e danışıldı
+    2026-08-06). A verb and a target object appearing far apart in
+    unrelated sentences must NOT co-fire — real example:
+    data/raw/gmail/eml/inbox-4742.eml (an Amazon order notification)
+    has "Lütfen ödeme aracınızı güncelleyin" (a request verb) and
+    "Hesabım" (a nav-menu link, target object) 1638 characters apart;
+    the old whole-body .search() flagged this as credential_request."""
+    text = ("Hesabım\n" + ("x" * 200) + "\nLütfen ödeme aracınızı güncelleyin.")
+    facts = extract_body_facts(text, is_html=False, has_action_channel=True)
+    assert facts["credential_request"] is False
+
+
+def test_credential_request_verb_and_target_close_together_flagged():
+    text = "Lütfen hesabınızı güncelleyin ve şifrenizi doğrulayın."
+    facts = extract_body_facts(text, is_html=False, has_action_channel=True)
+    assert facts["credential_request"] is True
+
+
+def test_credential_request_english_negation_not_flagged():
+    """We will never ask for your password" is a policy statement, not
+    a request — even though verb+target co-occur nearby."""
+    text = "We will never ask you to verify your account password by email."
+    facts = extract_body_facts(text, is_html=False, has_action_channel=True)
+    assert facts["credential_request"] is False
+
+
 def test_claims_attachment_when_none_exists():
     """holdout-fix-tasks.md T5, candidate 15: 'Attached Re-login' promises
     an attachment but the message has none (it's actually a link) —
@@ -407,6 +474,41 @@ def test_claims_attachment_turkish():
     assert facts["claims_attachment"] is True
 
 
+# --- Adım 8: scam-narrative body-text signals ------------------------------
+
+def test_advance_fee_fraud_language_detected():
+    text = ("Attention: Beneficiary, we discovered you have not received your "
+            "outstanding principal amount, valued at $650,000.00.")
+    facts = extract_body_facts(text, is_html=False)
+    assert facts["has_advance_fee_fraud_language"] is True
+
+
+def test_advance_fee_fraud_language_absent_on_clean_email():
+    facts = extract_body_facts("Hi, just confirming our meeting tomorrow at 10am.",
+                                is_html=False)
+    assert facts["has_advance_fee_fraud_language"] is False
+
+
+def test_fake_reward_claim_language_detected():
+    text = "Access the Token Redistribution and claim your tokens from the reserve."
+    facts = extract_body_facts(text, is_html=False)
+    assert facts["has_fake_reward_claim_language"] is True
+
+
+def test_fake_reward_claim_language_variant_claim_tokens_from():
+    """"claim tokens from X" (no "your") must also match — found on a
+    real missed phishing sample (sample-204.eml)."""
+    text = "allowing community members to claim tokens from the five billion redistributed XRP."
+    facts = extract_body_facts(text, is_html=False)
+    assert facts["has_fake_reward_claim_language"] is True
+
+
+def test_fake_reward_claim_language_absent_on_clean_email():
+    facts = extract_body_facts("Your order has shipped and will arrive Friday.",
+                                is_html=False)
+    assert facts["has_fake_reward_claim_language"] is False
+
+
 def test_html_form_detected():
     html = "<html><body><form action='http://evil.com'><input type='password'></form></body></html>"
     facts = extract_body_facts(html, is_html=True)
@@ -417,6 +519,24 @@ def test_hidden_text_detected():
     html = '<div style="display:none">hidden tracking text</div><p>Visible text</p>'
     facts = extract_body_facts(html, is_html=True)
     assert facts["has_hidden_text"] is True
+
+
+def test_short_hidden_text_is_not_large_hidden_text():
+    """A short hidden span (a preheader — the one-line summary email
+    clients show next to the subject) is a benign, standard marketing
+    technique. Rule Engine v2 scores has_large_hidden_text, not
+    has_hidden_text, so a preheader must not count as evidence."""
+    html = '<div style="display:none">See our latest deals inside!</div><p>Visible text</p>'
+    facts = extract_body_facts(html, is_html=True)
+    assert facts["has_hidden_text"] is True
+    assert facts["has_large_hidden_text"] is False
+
+
+def test_long_hidden_text_is_large_hidden_text():
+    html = (f'<div style="display:none">{"x" * 200}</div><p>Visible text</p>')
+    facts = extract_body_facts(html, is_html=True)
+    assert facts["has_hidden_text"] is True
+    assert facts["has_large_hidden_text"] is True
 
 
 # --- parse.py (integration, real corpus files) --------------------------

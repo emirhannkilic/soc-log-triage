@@ -17,6 +17,8 @@ from email.header import Header, decode_header
 from email.message import Message
 from email.utils import getaddresses, parseaddr
 
+from src.parser.psl import same_organization as _same_organization
+
 
 def _decode_rfc2047(raw_value) -> str | None:
     """Decode RFC 2047 encoded-words (=?UTF-8?B?...?=) in a header value.
@@ -44,6 +46,14 @@ def _decode_rfc2047(raw_value) -> str | None:
 
 _AUTH_RESULT_RE = re.compile(r"\b(spf|dkim|dmarc)=([a-zA-Z0-9_-]+)")
 _DKIM_DOMAIN_RE = re.compile(r"dkim=([a-zA-Z0-9_-]+)[^;]*?header\.[id]=@?([\w.-]+)")
+# smtp.mailfrom's value is the envelope-from address — sometimes a bare
+# domain ("mg.tdi.tc"), sometimes a full address ("bulten@email.x.com"),
+# sometimes quoted with an embedded '=' from VERP bounce encoding
+# ("bounces+123=gmail.com@x.com"). Capture up to the next ';' or
+# whitespace/quote and let _domain_of()'s existing parseaddr/regex
+# fallback (already handles addr-vs-bare-domain) pull the domain out,
+# rather than duplicating that logic here.
+_SPF_MAILFROM_RE = re.compile(r'smtp\.mailfrom=["\']?([^\s;"\']+)')
 
 # Last-resort fallback for addresses parseaddr can't handle — e.g. malformed
 # multi-name group syntax like '"Grüner Georg", jehd <service@x.com>', which
@@ -87,29 +97,19 @@ def _domain_of(address) -> str | None:
     return None
 
 
-def _registrable_domain(domain: str) -> str:
-    """Last two labels of a domain, as a cheap stand-in for the registrable
-    (organization) domain — no public-suffix-list lookup, so a two-label
-    ccTLD like "co.uk" is handled wrong (returns "co.uk" from
-    "mail.example.co.uk" instead of "example.co.uk"). Good enough at this
-    project's scale (v3 is a demo, see CLAUDE.md "Kapsam"): the mismatch it
-    can produce is a false organization match on an already-uncommon TLD
-    shape, not a missed phishing signal — a real attacker's domain would
-    still fail this on its own labels, not on the ccTLD parsing quirk."""
-    parts = domain.split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else domain
-
-
-def _same_organization(a: str | None, b: str | None) -> bool:
-    """Same domain, or one a subdomain of the same registrable domain as the
-    other (mailer.netflix.com / netflix.com) — the pattern large senders use
-    for bulk-mail infrastructure. Exact-string comparison flagged this as
-    third-party spoofing on a genuine Netflix email (dkim_domain=netflix.com,
-    from_domain=mailer.netflix.com, both real Netflix domains) — see
-    PROGRESS.md "inbox-9945.eml" for the false positive this produced."""
-    if not a or not b:
-        return False
-    return a == b or _registrable_domain(a) == _registrable_domain(b)
+def _domain_of_mailfrom_value(raw: str) -> str | None:
+    """smtp.mailfrom's value is either a bare domain ("mg.tdi.tc") or a full
+    address ("bulten@email.x.com", sometimes VERP-bounce-encoded like
+    "bounces+123-456=gmail.com@x.com"). _domain_of() only handles the
+    address case (it requires an '@' to find something via parseaddr or the
+    fallback regex) — a bare domain has no '@' and would silently come back
+    None. Try _domain_of() first (handles the address case, including VERP
+    quirks), fall back to treating the whole value as a domain."""
+    domain = _domain_of(raw)
+    if domain:
+        return domain
+    raw = raw.strip().strip("\"'").lower()
+    return raw or None
 
 
 def parse_authentication_results(msg: Message, from_domain: str | None) -> dict:
@@ -143,12 +143,32 @@ def parse_authentication_results(msg: Message, from_domain: str | None) -> dict:
         else _same_organization(dkim_domain, from_domain)
     )
 
+    # SPF alignment (adım 6): spf_result alone only says the ENVELOPE
+    # sender (smtp.mailfrom) passed SPF — it says nothing about whether
+    # that envelope domain has anything to do with the visible From
+    # header a recipient actually reads. A phishing sender can rent
+    # infrastructure with its own valid SPF record (smtp.mailfrom passes
+    # against ITS domain) while the visible From claims to be a bank.
+    # DMARC's real alignment check is exactly this comparison; the rule
+    # engine doesn't have a DMARC alignment mode to read, so it's computed
+    # directly here from smtp.mailfrom vs From.
+    mailfrom_match = _SPF_MAILFROM_RE.search(header)
+    spf_mailfrom_domain = (
+        _domain_of_mailfrom_value(mailfrom_match.group(1)) if mailfrom_match else None
+    )
+    spf_aligned = (
+        None if spf_mailfrom_domain is None or from_domain is None
+        else _same_organization(spf_mailfrom_domain, from_domain)
+    )
+
     return {
         "spf_result": spf_result,
         "dkim_result": dkim_result,
         "dkim_domain": dkim_domain,
         "dmarc_result": dmarc_result,
         "dkim_domain_matches_from": dkim_domain_matches_from,
+        "spf_mailfrom_domain": spf_mailfrom_domain,
+        "spf_aligned": spf_aligned,
     }
 
 

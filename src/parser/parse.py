@@ -15,7 +15,8 @@ from src.parser.headers import (
     parse_authentication_results,
     parse_routing_facts,
 )
-from src.parser.urls import extract_url_facts
+from src.parser.qr import extract_qr_urls_from_message
+from src.parser.urls import _build_url_fact, extract_url_facts
 from schemas.facts import AttachmentFacts, EmailFacts, UrlFacts
 
 
@@ -89,6 +90,19 @@ def parse_eml(path: Path) -> EmailFacts:
         raw_body, is_html = "", False
 
     url_facts = extract_url_facts(raw_body, is_html)
+    # Adım 7 (2026-08-08): QR codes embedded in body/attachment images hide
+    # a URL from every text-based scan above — decode them and feed the
+    # result through the same _build_url_fact() so a QR-carried phishing
+    # link scores through the existing url_ip_based/url_shortener/
+    # has_punycode signals, not a separate one. anchor_text=None: a QR
+    # code has no visible link text to compare against, so
+    # text_href_mismatch is correctly never claimed for these.
+    seen_urls = {f["url"] for f in url_facts}
+    for qr_url in extract_qr_urls_from_message(raw_msg):
+        if qr_url in seen_urls:
+            continue
+        seen_urls.add(qr_url)
+        url_facts.append(_build_url_fact(qr_url, anchor_text=None))
     # credential_request (T3) needs to know whether the message offers an
     # action channel (external link / attachment) alongside a request verb
     # + target object — url_facts/attachment_facts must be computed first.

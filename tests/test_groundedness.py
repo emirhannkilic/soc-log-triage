@@ -25,6 +25,20 @@ def _candidate_signals(index: int) -> dict:
     r.pop("_eml_path", None)
     r.pop("is_spam_not_phishing", None)
     r.pop("spam_reason", None)
+    # data/holdout/candidates.jsonl is a frozen snapshot written before
+    # later EmailFacts/AttachmentFacts fields existed (form_action_domain,
+    # has_large_hidden_text, spf_mailfrom_domain, spf_aligned,
+    # extension_mismatch) — CLAUDE.md locks hold-out data itself from
+    # being touched, so backfill neutral defaults here rather than
+    # regenerating the file.
+    r.setdefault("form_action_domain", None)
+    r.setdefault("has_large_hidden_text", False)
+    r.setdefault("spf_mailfrom_domain", None)
+    r.setdefault("spf_aligned", None)
+    r.setdefault("has_advance_fee_fraud_language", False)
+    r.setdefault("has_fake_reward_claim_language", False)
+    for a in r.get("attachments", []):
+        a.setdefault("extension_mismatch", False)
     facts = EmailFacts(
         **{k: v for k, v in r.items() if k not in ("urls", "attachments", "urgency_keywords")},
         urls=[UrlFacts(**u) for u in r["urls"]],

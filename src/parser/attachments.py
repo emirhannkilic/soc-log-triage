@@ -3,6 +3,8 @@ Extracts attachment facts from an email.message.Message (v3 plan section 4.5).
 """
 from email.message import Message
 
+from src.parser.magic import has_extension_mismatch
+
 # Extensions that can execute code or carry a payload on their own, or that
 # commonly wrap one (office formats with macro support). Archive formats
 # (.zip, .rar, .7z, .iso, .img, .cab) are NOT here — an archive isn't
@@ -73,6 +75,7 @@ def extract_attachment_facts(msg: Message) -> list[dict]:
             "double_extension": _has_double_extension(filename),
             "risky_type": extension in _RISKY_EXTENSIONS if extension else False,
             "is_archive": extension in _ARCHIVE_EXTENSIONS if extension else False,
+            "extension_mismatch": has_extension_mismatch(payload, filename),
         })
 
     return facts

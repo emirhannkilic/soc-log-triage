@@ -7,6 +7,8 @@ from email.message import Message
 
 from bs4 import BeautifulSoup
 
+from src.parser.urls import _domain_of_url
+
 BODY_TEXT_MAX_CHARS = 2000
 
 # holdout-fix-tasks.md T2: keeping the two languages as separate lists so
@@ -83,6 +85,57 @@ _CREDENTIAL_TARGET_OBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Codex'e danışıldı 2026-08-06 (Rule Engine v2, credential bağlam
+# penceresi düzeltmesi). Eski mantık, verb ve target object'i TÜM
+# body_text üzerinde ayrı ayrı .search() ediyordu — ikisi birbirinden
+# çok uzakta, alakasız iki cümlede geçse bile eşleşiyordu. Somut
+# örnek: data/raw/gmail/eml/inbox-4742.eml (Amazon sipariş bildirimi)
+# "Lütfen ödeme aracınızı güncelleyin" (index 1720) ile "Hesabım"
+# (index 82, navigasyon menüsü linki) 1638 karakter uzakta, tamamen
+# ilgisiz iki öğe — ama eski mantık credential_request=True üretiyordu.
+# Düzeltme: verb ve target object AYNI PENCEREDE (±100 karakter) olmalı.
+_CREDENTIAL_CONTEXT_WINDOW_CHARS = 100
+
+# "asla parolanızı istemeyiz" tarzı güvenlik uyarıları verb+target
+# object'i aynı cümlede taşıyabilir (T3'ün candidate 29/20 örnekleri
+# bunun bir varyasyonu, o zaman "verb yok" mantığıyla düzeltilmişti —
+# ama "never ask"/"always verify" gibi kalıplar READER'a değil
+# GÖNDERENİN kendi politikasına atıfta bulunduğu için verb+target aynı
+# pencerede de olabilir). Negasyon kelimesi verb'e yakınsa (aynı
+# pencere) bu bir TALEP değil bir UYARI/POLİTİKA beyanıdır.
+_CREDENTIAL_NEGATION_RE = re.compile(
+    r"\b("
+    r"asla|hiçbir\s*zaman|kesinlikle\s*istemeyiz|"
+    r"never|will\s*not|won'?t|do\s*not\s*need\s*to"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _credential_request_in_context(text: str) -> bool:
+    """True only if a request verb and a target object co-occur within
+    _CREDENTIAL_CONTEXT_WINDOW_CHARS of each other, AND that window
+    isn't a negation ("we will never ask for your password").
+
+    The negation check widens the window by _CREDENTIAL_CONTEXT_WINDOW_CHARS
+    on EACH side (not just between verb and target) — "We will NEVER ask
+    you to verify your account" puts "never" before both matches, outside
+    a verb-to-target-only span."""
+    verb_matches = list(_CREDENTIAL_REQUEST_VERB_RE.finditer(text))
+    target_matches = list(_CREDENTIAL_TARGET_OBJECT_RE.finditer(text))
+    for v in verb_matches:
+        for t in target_matches:
+            distance = max(v.start(), t.start()) - min(v.end(), t.end())
+            if distance > _CREDENTIAL_CONTEXT_WINDOW_CHARS:
+                continue
+            window_start = max(0, min(v.start(), t.start()) - _CREDENTIAL_CONTEXT_WINDOW_CHARS)
+            window_end = min(len(text), max(v.end(), t.end()) + _CREDENTIAL_CONTEXT_WINDOW_CHARS)
+            window = text[window_start:window_end]
+            if _CREDENTIAL_NEGATION_RE.search(window):
+                continue
+            return True
+    return False
+
 # holdout-fix-tasks.md T5: candidate 15 ("Attached Re-login") has an empty
 # attachments list but its body claims one exists — the "attachment" is
 # actually a link, a social-engineering pattern in its own right (promising
@@ -93,6 +146,44 @@ _CREDENTIAL_TARGET_OBJECT_RE = re.compile(
 # rule engine decides what to do with that combined with attachments=[]).
 _ATTACHMENT_CLAIM_RE = re.compile(
     r"\b(attach(?:ed|ment)?|ekte|ek\s*olarak|ekli\s*dosya)\b",
+    re.IGNORECASE,
+)
+
+# Rule Engine v2 adım 8 (CLAUDE.md), 2026-08-08. Two narrow, idiom-level
+# scam-language patterns — found on data/rule_engine_v2_devset's 16
+# phishing candidates the family formula was still missing entirely (0
+# signals across all four families): 419/advance-fee fraud and fake
+# crypto/lottery reward claims share a defining trait none of this
+# project's other signals cover — they carry ZERO header misalignment
+# and often zero URLs/attachments (sample-4784.eml: gmail.com, SPF/DKIM/
+# DMARC all pass, 0 URLs, 0 attachments, body is pure social-engineering
+# prose). No header/URL signal can ever catch this class; only body text
+# can.
+#
+# Deliberately NOT built like _credential_request_in_context's generic
+# verb+target-object+window — these are idiom-level phrases ("outstanding
+# principal", "next of kin", "claim your tokens"), not generic words that
+# need a context window to disambiguate. A single regex match on a
+# specific multi-word phrase already IS the disambiguation; adding a
+# window would only widen false-positive surface for no precision gain.
+# Measured on data/rule_engine_v2_devset (100 mail): 4/50 phishing hits,
+# 0/50 legitimate false positives — see config/rules.yaml's weight
+# rationale for why this alone doesn't cross to Phishing.
+_ADVANCE_FEE_FRAUD_RE = re.compile(
+    r"\b("
+    r"beneficiary|outstanding\s+(fund|principal|balance)|deposited\s+fund|"
+    r"scammed?\s+victims?|next\s+of\s+kin|unclaimed\s+(fund|inheritance)|"
+    r"compensation\s+(fund|payment)"
+    r")\b",
+    re.IGNORECASE,
+)
+_FAKE_REWARD_CLAIM_RE = re.compile(
+    r"\b("
+    r"claim\s+(your\s+)?(share|tokens?|reward|prize|allotment)|"
+    r"token\s+(redistribution|allocation)|reward\s+program|"
+    r"you\s*(’|')?ve\s+won|lottery\s+winner|winning\s+notification|"
+    r"selected\s+as\s+a?\s*winner"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -199,9 +290,9 @@ def extract_body_facts(
     has_action_channel: bool = False,
     has_attachments: bool = False,
 ) -> dict:
-    """Returns has_html_form, has_hidden_text, image_only_body,
-    urgency_keywords, credential_request, claims_attachment, body_text,
-    language.
+    """Returns has_html_form, form_action_domain, has_hidden_text,
+    image_only_body, urgency_keywords, credential_request,
+    claims_attachment, body_text, language.
 
     has_action_channel: True if the message has an external URL or an
     attachment — the caller (parse.py) computes this from
@@ -218,20 +309,48 @@ def extract_body_facts(
         text = soup.get_text(separator="\n")
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-        has_html_form = soup.find("form") is not None
+        form_tag = soup.find("form")
+        has_html_form = form_tag is not None
+        # Rule Engine v2 adım 6 (CLAUDE.md), form-action domain kontrolü.
+        # A form's own presence is weak on its own (legitimate surveys/
+        # signup forms exist) — what actually distinguishes a credential-
+        # harvesting form is where the SUBMITTED data goes. A relative
+        # action ("/login") or no action attribute at all posts back to
+        # the sender's own domain, which this leaves as None (nothing to
+        # compare) rather than guessing a domain that isn't actually
+        # written in the HTML.
+        form_action_domain = None
+        if form_tag is not None:
+            action = form_tag.get("action")
+            if action:
+                form_action_domain = _domain_of_url(action)
 
-        has_hidden_text = False
+        # T6-style ambiguity Codex flagged 2026-08-06: display:none / a
+        # zero-size style span is ALSO the standard, benign technique for
+        # a preheader ("gizli önizleme metni" — the one-line summary
+        # email clients show next to the subject, hidden from the
+        # rendered body itself). A short hidden span is normal marketing
+        # boilerplate; a LARGE hidden block is what a real content-hiding
+        # attack looks like (stuffing invisible text to evade spam/
+        # phishing filters). Splitting on length: rule engine treats
+        # image_only_body as evidence on its own, but only counts hidden
+        # text as evidence when it's long enough not to be a preheader.
+        _PREHEADER_MAX_CHARS = 150
+        hidden_text_total_chars = 0
         for tag in soup.find_all(style=True):
             style = tag["style"].lower().replace(" ", "")
             if "display:none" in style or re.search(r"font-size:0", style):
-                has_hidden_text = True
-                break
+                hidden_text_total_chars += len(tag.get_text(strip=True))
+        has_hidden_text = hidden_text_total_chars > 0
+        has_large_hidden_text = hidden_text_total_chars > _PREHEADER_MAX_CHARS
 
         has_images = bool(soup.find_all("img"))
     else:
         text = raw_body.strip()
         has_html_form = False
+        form_action_domain = None
         has_hidden_text = False
+        has_large_hidden_text = False
         has_images = False
 
     # Strip before ANY signal is computed: the banner must not reach the
@@ -269,22 +388,27 @@ def extract_body_facts(
 
     action_channel_present = has_action_channel or has_html_form
     credential_request = bool(
-        action_channel_present
-        and _CREDENTIAL_REQUEST_VERB_RE.search(text)
-        and _CREDENTIAL_TARGET_OBJECT_RE.search(text)
+        action_channel_present and _credential_request_in_context(text)
     )
 
     claims_attachment = bool(
         not has_attachments and _ATTACHMENT_CLAIM_RE.search(text)
     )
 
+    has_advance_fee_fraud_language = bool(_ADVANCE_FEE_FRAUD_RE.search(text))
+    has_fake_reward_claim_language = bool(_FAKE_REWARD_CLAIM_RE.search(text))
+
     return {
         "has_html_form": has_html_form,
+        "form_action_domain": form_action_domain,
         "has_hidden_text": has_hidden_text,
+        "has_large_hidden_text": has_large_hidden_text,
         "image_only_body": image_only_body,
         "urgency_keywords": found_urgency,
         "credential_request": credential_request,
         "claims_attachment": claims_attachment,
+        "has_advance_fee_fraud_language": has_advance_fee_fraud_language,
+        "has_fake_reward_claim_language": has_fake_reward_claim_language,
         "body_text": text[:BODY_TEXT_MAX_CHARS],
         "language": detected_language,
     }

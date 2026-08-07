@@ -43,6 +43,29 @@ signals:
     weight: 3
     description: "DKIM imzası geçerli AMA imzalayan domain from_domain değil (üçüncü taraf spoofing)"
 
+  # Rule Engine v2 adım 6 (CLAUDE.md), 2026-08-07. SADECE v2'de kullanılır
+  # (v1 bu alanı okumuyor). spf_result=pass, zarf göndericisinin
+  # (smtp.mailfrom) KENDİ domain'inin SPF kaydına uyduğunu kanıtlar — From
+  # başlığında görünen domain'le hiçbir ilişkisi olmayabilir. DMARC'ın asıl
+  # yaptığı "alignment" kontrolü tam bu: saldırgan kendi altyapısıyla
+  # (geçerli SPF kaydı olan kiralık bir domain) meşru bir bankanın From
+  # adresini taklit edebilir, spf=pass görünse bile. dkim_pass_but_
+  # domain_mismatch ile simetrik mantık, aynı ağırlık (+3).
+  #
+  # GUARD (engine_v2.py'de uygulanıyor, burada değil): DKIM zaten pass VE
+  # domain uyumluysa bu sinyal TETİKLENMİYOR. Dev sette (100 mail) guard
+  # olmadan ölçüldü: 6/6 tetiklenme legitimate toplu-mail gönderenlerdeydi
+  # (Amazon SES, Persona Click) — SPF IP tabanlı, paylaşılan ESP IP'si her
+  # kiracı için "misaligned" çıkar, bu normal ESP yönlendirmesi, sahtecilik
+  # değil. DKIM mesajın kendisini kriptografik olarak imzalar (IP'yi değil);
+  # DKIM zaten bağımsız olarak From'u doğruluyorsa SPF/zarf uyumsuzluğu ek
+  # kanıt taşımıyor. Guard sonrası ölçüm: 0/8 yeni false-positive, 1 ek
+  # phishing örneği yakalandı (recall 66.0%→68.0%, flagged-oranı %16.0'da
+  # sabit kaldı).
+  spf_pass_but_mailfrom_misaligned:
+    weight: 3
+    description: "SPF pass AMA smtp.mailfrom domain'i from_domain ile aynı organizasyon değil VE DKIM zaten aligned değil"
+
   return_path_mismatch:
     weight: 2
     description: "Return-Path domain != From domain"
@@ -132,6 +155,19 @@ signals:
     weight: 3
     description: "Mail gövdesinde HTML form var (kimlik bilgisi doğrudan mailde toplanıyor)"
 
+  # Rule Engine v2 adım 6 (CLAUDE.md), 2026-08-06. has_html_form'un
+  # kendisi zayıf (meşru anket/form maili olabilir) — asıl kritik olan
+  # WHERE the submitted data goes. Form action'ı From domain'inden
+  # FARKLI bir domaine gidiyorsa (ve form bir credential_request de
+  # taşıyorsa), bu doğrudan kimlik bilgisi hırsızlığı deseni. +4:
+  # attachment_double_extension ile aynı ağırlık, tek başına Phishing'e
+  # yaklaştıracak kadar güçlü — ama HENÜZ kritik predicate listesine
+  # eklenmedi (o ayrı bir karar, CLAUDE.md'nin "gelecekte eklenebilecek
+  # kritik koşul" notu bunu bekliyor, henüz kilitlenmedi).
+  form_action_domain_mismatch:
+    weight: 4
+    description: "HTML form action'ı From domain'inden farklı bir domaine gidiyor VE kimlik bilgisi talebi var"
+
   # +2: gelen kutusu display name'i gösterir, gerçek adresi gizler. Display
   # name'in kendisini bir e-posta adresi yapmak ("destek@banka.com"
   # <x@evil.ru>) alıcının gördüğü tek şeyi sahteleştirir. return_path_mismatch
@@ -156,6 +192,19 @@ signals:
     weight: 4
     description: "Çift uzantılı ek var (örn. invoice.pdf.exe)"
 
+  # Rule Engine v2 adım 7 (CLAUDE.md), 2026-08-08. SADECE v2'de kullanılır.
+  # attachment_double_extension'ın tersi mekanizma, aynı iddia: dosya adı
+  # ve MIME type saldırganın kontrolündeki metadata, ekin gerçek ilk
+  # byte'ları (magic number, src/parser/magic.py) değil. ".pdf" adında
+  # ama içeriği MZ (Windows PE) ile başlayan bir ek, uzantının kendisinden
+  # bağımsız bir kanıt taşır — çift uzantı OLMASA bile. attachment_double_
+  # extension ile aynı ağırlık (+4): ikisi de "bu ekin gerçek doğası adının
+  # arkasına gizlenmiş" diyor, sadece farklı mekanizmalarla (sahte ikinci
+  # uzantı vs. gerçekten farklı dosya içeriği).
+  attachment_extension_mismatch:
+    weight: 4
+    description: "Ekin gerçek byte imzası (magic number) dosya adının iddia ettiği türden farklı (örn. .pdf adında ama .exe içeriği)"
+
   hidden_text_or_image_only:
     weight: 2
     description: "Gizli metin VEYA gövde sadece görselden oluşuyor"
@@ -175,6 +224,29 @@ signals:
   claims_attachment_but_empty:
     weight: 2
     description: "Gövde ek vaat ediyor ('ekte', 'attached') ama attachments boş (T5)"
+
+  # --- Rule Engine v2 adım 8 (CLAUDE.md), 2026-08-08 ------------------------
+  # Dev sette (100 mail) family formülünün SIFIR sinyal ürettiği 16
+  # kaçırılan phishing örneğinin ikisi bu iki dar kalıba giriyor: 419/avans
+  # ücreti dolandırıcılığı ve sahte ödül/kripto claim'i. Ortak özellikleri:
+  # SIFIR header uyumsuzluğu, genelde SIFIR URL/ek — hiçbir başka sinyal bu
+  # sınıfı yakalayamaz, sadece gövde metni yakalayabilir. Ölçüm: 4/50
+  # phishing hit, 0/50 legitimate false-positive (dev set).
+  #
+  # Ağırlık DÜŞÜK tutuldu (+1, urgency_keywords ile aynı seviye) bilinçli
+  # bir kararla: bu kalıplar TEK BAŞINA "Phishing" kararına yeterli
+  # sayılmıyor, meşru miras/çekiliş/hayır işi haberleri de benzer dil
+  # kullanabilir (bu dev sette hiç görülmedi ama küçük örneklem — 50
+  # legitimate — bunu garanti etmiyor). content ailesinin corroboration
+  # mantığı zaten bunu bir header/URL zayıflığıyla (örn. from_domain
+  # ücretsiz posta, auth fail) birleşene kadar orta bantta tutuyor.
+  advance_fee_fraud_language:
+    weight: 1
+    description: "419/avans ücreti dolandırıcılığı dil kalıbı (beneficiary, outstanding fund, next of kin vb.)"
+
+  fake_reward_claim_language:
+    weight: 1
+    description: "Sahte ödül/çekiliş/kripto claim dil kalıbı (claim your tokens, token redistribution, lottery winner vb.)"
 
   from_domain_no_tld:
     weight: 3
