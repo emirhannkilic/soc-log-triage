@@ -42,9 +42,9 @@ def _finding(type_, start=0, end=10, confidence=0.9) -> ValidatedSemanticFinding
     )
 
 
-def _context(has_url=False, url_count=0, parser_credential_request=False) -> PhishingDecisionContext:
+def _context(has_external_url=False, url_count=0, parser_credential_request=False) -> PhishingDecisionContext:
     return PhishingDecisionContext(
-        has_url=has_url,
+        has_external_url=has_external_url,
         url_count=url_count,
         url_ids=[f"http://x{i}.example" for i in range(url_count)],
         parser_credential_request=parser_credential_request,
@@ -52,7 +52,7 @@ def _context(has_url=False, url_count=0, parser_credential_request=False) -> Phi
 
 
 NO_URL = _context()
-WITH_URL = _context(has_url=True, url_count=1)
+WITH_EXTERNAL_URL = _context(has_external_url=True, url_count=1)
 
 
 # --- Phishing is never touched ------------------------------------------
@@ -107,7 +107,7 @@ def test_muhtemel_phishing_not_upgraded_to_phishing_by_semantic_findings():
         _finding(SemanticFindingType.PAYMENT_REQUEST),
         _finding(SemanticFindingType.THREAT_OR_FEAR),
     ]
-    result = decide(assessment, findings, WITH_URL)
+    result = decide(assessment, findings, WITH_EXTERNAL_URL)
     assert result.final_verdict == "Muhtemel Phishing"
 
 
@@ -116,7 +116,7 @@ def test_muhtemel_phishing_not_upgraded_to_phishing_by_semantic_findings():
 def test_guvenilir_upgraded_by_credential_request_with_url():
     assessment = _assessment("Güvenilir")
     findings = [_finding(SemanticFindingType.CREDENTIAL_REQUEST, 5, 20)]
-    result = decide(assessment, findings, WITH_URL)
+    result = decide(assessment, findings, WITH_EXTERNAL_URL)
     assert result.rule_verdict == "Güvenilir"
     assert result.final_verdict == "Muhtemel Phishing"
     assert result.decision_path == DECISION_PATH_CREDENTIAL_REQUEST_URL_UPGRADE
@@ -125,9 +125,9 @@ def test_guvenilir_upgraded_by_credential_request_with_url():
 
 
 def test_guvenilir_not_upgraded_by_credential_request_without_url():
-    """context.has_url must come from the deterministic parser, not be
-    assumed — credential_request alone (no external link) doesn't
-    upgrade."""
+    """context.has_external_url must come from the deterministic
+    parser, not be assumed — credential_request alone (no external
+    link) doesn't upgrade."""
     assessment = _assessment("Güvenilir")
     findings = [_finding(SemanticFindingType.CREDENTIAL_REQUEST)]
     result = decide(assessment, findings, NO_URL)
@@ -137,7 +137,7 @@ def test_guvenilir_not_upgraded_by_credential_request_without_url():
 def test_guvenilir_not_upgraded_by_url_alone_without_credential_request():
     assessment = _assessment("Güvenilir")
     findings = [_finding(SemanticFindingType.URGENCY_OR_PRESSURE)]
-    result = decide(assessment, findings, WITH_URL)
+    result = decide(assessment, findings, WITH_EXTERNAL_URL)
     assert result.final_verdict == "Güvenilir"
 
 
@@ -196,7 +196,7 @@ def test_payment_request_alone_with_urgency_stays_guvenilir():
         _finding(SemanticFindingType.PAYMENT_REQUEST, 0, 10),
         _finding(SemanticFindingType.URGENCY_OR_PRESSURE, 20, 30),
     ]
-    result = decide(assessment, findings, WITH_URL)
+    result = decide(assessment, findings, WITH_EXTERNAL_URL)
     assert result.final_verdict == "Güvenilir"
     assert result.decision_path == DECISION_PATH_RULE_ENGINE_ONLY
 
@@ -218,14 +218,14 @@ def test_payment_request_alone_with_brand_impersonation_stays_guvenilir():
 def test_urgency_or_pressure_alone_never_upgrades():
     assessment = _assessment("Güvenilir")
     findings = [_finding(SemanticFindingType.URGENCY_OR_PRESSURE)]
-    result = decide(assessment, findings, WITH_URL)
+    result = decide(assessment, findings, WITH_EXTERNAL_URL)
     assert result.final_verdict == "Güvenilir"
     assert result.decision_path == DECISION_PATH_RULE_ENGINE_ONLY
 
 
 def test_no_findings_at_all_stays_guvenilir():
     assessment = _assessment("Güvenilir")
-    result = decide(assessment, [], WITH_URL)
+    result = decide(assessment, [], WITH_EXTERNAL_URL)
     assert result.final_verdict == "Güvenilir"
     assert result.analyst_review_required is False
 
@@ -235,7 +235,7 @@ def test_no_findings_at_all_stays_guvenilir():
 def test_authority_impersonation_alone_never_upgrades():
     assessment = _assessment("Güvenilir")
     findings = [_finding(SemanticFindingType.AUTHORITY_IMPERSONATION)]
-    result = decide(assessment, findings, WITH_URL)
+    result = decide(assessment, findings, WITH_EXTERNAL_URL)
     assert result.final_verdict == "Güvenilir"
 
 
@@ -264,7 +264,7 @@ def test_authority_impersonation_never_appears_in_contributing_semantic_ids():
         _finding(SemanticFindingType.CREDENTIAL_REQUEST, 0, 10),
         _finding(SemanticFindingType.AUTHORITY_IMPERSONATION, 20, 30),
     ]
-    result = decide(assessment, findings, WITH_URL)
+    result = decide(assessment, findings, WITH_EXTERNAL_URL)
     assert result.final_verdict == "Muhtemel Phishing"
     assert result.contributing_semantic_ids == ["credential_request:0-10"]
     assert not any("authority_impersonation" in sid for sid in result.contributing_semantic_ids)
@@ -280,8 +280,8 @@ def test_model_confidence_never_affects_the_decision():
     assessment = _assessment("Güvenilir")
     low_conf = [_finding(SemanticFindingType.CREDENTIAL_REQUEST, confidence=0.01)]
     high_conf = [_finding(SemanticFindingType.CREDENTIAL_REQUEST, confidence=0.99)]
-    result_low = decide(assessment, low_conf, WITH_URL)
-    result_high = decide(assessment, high_conf, WITH_URL)
+    result_low = decide(assessment, low_conf, WITH_EXTERNAL_URL)
+    result_high = decide(assessment, high_conf, WITH_EXTERNAL_URL)
     assert result_low.final_verdict == result_high.final_verdict == "Muhtemel Phishing"
 
 
@@ -305,7 +305,7 @@ def test_context_extra_field_is_rejected():
     from pydantic import ValidationError
     try:
         PhishingDecisionContext(
-            has_url=False, url_count=0, url_ids=[],
+            has_external_url=False, url_count=0, url_ids=[],
             parser_credential_request=False, extra_field="x",
         )
         raise AssertionError("expected ValidationError")

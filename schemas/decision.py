@@ -11,7 +11,7 @@ auditable (every field it can see is a field some rule actually reads)
 and stops a policy rule from reaching into EmailFacts for something
 ad hoc that isn't tracked in `decision_reasons`/`contributing_*_ids`.
 
-WHY has_url IS DETERMINISTIC, NOT A SEMANTIC FINDING
+WHY has_external_url IS DETERMINISTIC, NOT A SEMANTIC FINDING
     The credential_request-upgrade rule needs to know "is there an
     external link in this email" — that's the parser's job
     (EmailFacts.urls), not something to re-derive from what the model
@@ -21,6 +21,23 @@ WHY has_url IS DETERMINISTIC, NOT A SEMANTIC FINDING
     answer "what does the BODY TEXT say," context answers "what does
     the PARSER'S deterministic analysis say" — see phishing_policy.py's
     module docstring for the full rationale.
+
+WHY "external" MEANS same_organization()-FALSE, NOT MERELY "any URL"
+    The field was originally named has_url and set to "at least one URL
+    exists at all" — this over-triggered: a credential_request finding
+    together with an entirely SELF-referential link (e.g. a real
+    password-reset email from bank.com linking to bank.com/reset) would
+    upgrade the verdict even though the link isn't evidence of anything
+    suspicious — it points at the sender's OWN organization, the same
+    pattern src/parser/psl.py's same_organization() already exists to
+    recognize for other signals (mailer.netflix.com vs netflix.com is
+    not third-party spoofing). "External" here means: at least one URL
+    whose href_domain is NOT the same organization as facts.from_domain
+    (src/decision/context.py's build_context() computes this via
+    same_organization(), the SAME public-suffix-aware helper
+    src/rules/engine_v2.py and src/parser/headers.py already use, so
+    this can't silently drift into a different, weaker "same
+    organization" definition of its own).
 
 parser_credential_request IS PROVENANCE ONLY, NOT A TRIGGER
     EmailFacts.credential_request (the parser's own regex/keyword
@@ -39,7 +56,13 @@ from schemas.rule_assessment import RuleVerdict
 class PhishingDecisionContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    has_url: bool
+    has_external_url: bool
+    # ^ True iff at least one URL's href_domain is NOT the same
+    # organization (src/parser/psl.py's same_organization()) as
+    # facts.from_domain — see module docstring's "WHY 'external' MEANS
+    # same_organization()-FALSE" section. A same-organization link
+    # (e.g. a real password-reset link pointing back at the sender's
+    # own domain) does not count.
     url_count: int
     url_ids: list[str]  # the URLs themselves (EmailFacts.urls[i].url) — no separate id field exists
     # Provenance only — see module docstring. The policy must not

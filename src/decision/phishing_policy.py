@@ -57,8 +57,8 @@ PROVENANCE FIELDS ON PhishingDecisionContext ARE NOT TRIGGERS
     only. It already contributed to RuleAssessment's score (v1's
     credential_request_with_external_link signal, v2's content family)
     — branching on it again here would double-count the same evidence
-    under a different name. Only context.has_url is read by any rule
-    below.
+    under a different name. Only context.has_external_url is read by
+    any rule below.
 """
 from schemas.decision import FinalDecision, PhishingDecisionContext
 from schemas.rule_assessment import RuleAssessment
@@ -143,7 +143,7 @@ def decide(
     # findings are allowed to upgrade.
     present_types = _types_present(semantic_findings)
 
-    if SemanticFindingType.CREDENTIAL_REQUEST in present_types and context.has_url:
+    if SemanticFindingType.CREDENTIAL_REQUEST in present_types and context.has_external_url:
         contributing = [
             _semantic_id(f) for f in semantic_findings
             if f.type == SemanticFindingType.CREDENTIAL_REQUEST
