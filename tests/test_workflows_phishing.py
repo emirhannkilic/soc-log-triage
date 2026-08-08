@@ -157,17 +157,68 @@ def test_hybrid_mode_semantic_extraction_error_invalid_json_falls_back_to_rule_v
 
 def test_hybrid_mode_semantic_extraction_error_model_call_failed_also_falls_back():
     """code="model_call_failed" (the underlying QwenService/LLMServiceError
-    failure — e.g. a GPU/Metal timeout, PROGRESS.md) must be caught the
-    same way as code="invalid_json" — the workflow catches
-    SemanticExtractionError itself, not a specific code."""
+    failure — e.g. a GPU/Metal timeout, PROGRESS.md) must still fall back
+    to the mechanical report and keep the deterministic rule_verdict —
+    but, unlike code="invalid_json", it must do so WITHOUT attempting the
+    second (report) Qwen call at all. See the two dedicated tests below
+    for that distinction; this test only covers the shared fallback
+    behavior (final_decision/report still correct)."""
+    mock_report = MagicMock()
     with patch.object(
         wf, "analyze_semantic",
         side_effect=SemanticExtractionError(code="model_call_failed", message="GPU Timeout"),
-    ), patch.object(wf, "generate_report", _mock_qwen_success()):
+    ), patch.object(wf, "generate_report", mock_report):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.semantic_status == "failed"
     assert result.final_decision.final_verdict == result.rule_assessment.rule_verdict
+    assert result.report.risk_seviyesi == result.rule_assessment.rule_verdict
+    assert result.report_source == "mechanical"
+    assert result.llm_report_status == "failed_fallback"
+    assert result.llm_report_error_code == "model_call_failed"
+
+
+# --- semantic_error_code decides whether the second Qwen call is attempted ---
+
+def test_hybrid_mode_model_call_failed_skips_second_qwen_call_entirely():
+    """The FIRST Qwen call (semantic extraction) failed with
+    code="model_call_failed" — the underlying QwenService itself is
+    broken (e.g. a GPU/Metal timeout), and per src/llm/service.py's "tek
+    model, iki çağrı" design the SECOND call (report generation) would
+    reuse the exact same lazily-loaded model instance within this same
+    request. Retrying it would just reproduce the same infrastructure
+    failure a few seconds later, so generate_report() must never even be
+    called — this is the fast-fail this task added, not merely "falls
+    back eventually"."""
+    mock_report = MagicMock()
+    with patch.object(
+        wf, "analyze_semantic",
+        side_effect=SemanticExtractionError(code="model_call_failed", message="GPU Timeout"),
+    ), patch.object(wf, "generate_report", mock_report):
+        result = analyze_phishing(SAMPLE_EML, mode="hybrid")
+
+    assert not mock_report.called
+    assert result.report_source == "mechanical"
+    assert result.llm_report_status == "failed_fallback"
+    assert result.llm_report_error_code == "model_call_failed"
+
+
+def test_hybrid_mode_invalid_json_still_attempts_second_qwen_call():
+    """The FIRST Qwen call failed with code="invalid_json" — the model
+    itself responded (just with unparseable output), so the underlying
+    infrastructure is known-good. Unlike "model_call_failed", this must
+    NOT short-circuit: generate_report() (the second, independent Qwen
+    call) is still attempted normally."""
+    mock_report = _mock_qwen_success()
+    with patch.object(
+        wf, "analyze_semantic",
+        side_effect=SemanticExtractionError(code="invalid_json", message="bad json"),
+    ), patch.object(wf, "generate_report", mock_report):
+        result = analyze_phishing(SAMPLE_EML, mode="hybrid")
+
+    assert mock_report.called
+    assert result.report_source == "qwen"
+    assert result.llm_report_status == "completed"
 
 
 def test_hybrid_mode_unexpected_exception_is_not_swallowed():

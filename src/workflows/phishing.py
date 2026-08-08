@@ -97,28 +97,45 @@ REPORT GENERATION (PHISHING_ROUTING_PLAN.md section 10.5, "Qwen çağrı 2")
 
     Hybrid mode, after decide() produces a FinalDecision, calls
     src/report/generate.py's generate_report() to have Qwen write the
-    Turkish report. generate_report() never repairs or retries its own
-    output (same "çıktıyı onarma yasak" rule analyze_semantic() already
-    applies) — it either returns a valid, verdict-matching Report or
-    raises ReportGenerationError. This module is the one that decides
-    what happens next: on ReportGenerationError, the deterministic
-    mechanical report (already used by fast mode) is substituted, so a
-    broken model call NEVER prevents a report from being produced — it
-    only changes which report generator produced it.
+    Turkish report — UNLESS the semantic extraction step (the FIRST Qwen
+    call in this same request) already failed with
+    SemanticExtractionError(code="model_call_failed"). That code means
+    the underlying QwenService itself failed (e.g. a GPU/Metal timeout)
+    — and per src/llm/service.py's "tek model, iki çağrı" design, the
+    SECOND call would reuse the exact same lazily-loaded model instance,
+    so attempting it would just reproduce the same infrastructure
+    failure a few seconds later instead of failing fast. Any OTHER
+    semantic failure code (currently only "invalid_json") means the
+    model itself responded successfully — the infrastructure is
+    known-good, so a second, independent report call is still attempted
+    normally.
+
+    generate_report() never repairs or retries its own output (same
+    "çıktıyı onarma yasak" rule analyze_semantic() already applies) — it
+    either returns a valid, verdict-matching Report or raises
+    ReportGenerationError. This module is the one that decides what
+    happens next: on ReportGenerationError (or on the model_call_failed
+    short-circuit above), the deterministic mechanical report (already
+    used by fast mode) is substituted, so a broken model call NEVER
+    prevents a report from being produced — it only changes which report
+    generator produced it.
 
     report_source and llm_report_status record which happened, so a
     caller/observer can tell "the model wrote this" from "the model was
     asked but failed and this is the deterministic fallback" without
     inspecting report content:
 
-        mode="fast"                          -> report_source="mechanical",
-                                                 llm_report_status="not_requested"
-        mode="hybrid", Qwen succeeds          -> report_source="qwen",
-                                                 llm_report_status="completed"
-        mode="hybrid", Qwen fails (any code)  -> report_source="mechanical",
-                                                 llm_report_status="failed_fallback",
-                                                 llm_report_error_code=<the
-                                                 ReportGenerationError's code>
+        mode="fast"                              -> report_source="mechanical",
+                                                     llm_report_status="not_requested"
+        mode="hybrid", Qwen succeeds              -> report_source="qwen",
+                                                     llm_report_status="completed"
+        mode="hybrid", semantic step already hit  -> report_source="mechanical",
+        code="model_call_failed" (2nd call           llm_report_status="failed_fallback",
+        skipped entirely)                            llm_report_error_code="model_call_failed"
+        mode="hybrid", Qwen report call fails      -> report_source="mechanical",
+        (any ReportGenerationError code)              llm_report_status="failed_fallback",
+                                                       llm_report_error_code=<the
+                                                       ReportGenerationError's code>
 
     generate_report() itself has no notion of "fallback" or a status
     field — it only ever returns a successful Report or raises. Fallback
@@ -210,6 +227,10 @@ def analyze_phishing(email_input: Path, mode: AnalysisMode = "fast") -> Phishing
     accepted_findings: list[ValidatedSemanticFinding] = []
     rejected_findings: list[ValidatedFinding] = []
     semantic_skip_reason: str | None = None
+    # Set only when analyze_semantic() raised SemanticExtractionError —
+    # carries its .code through to the report-generation decision below.
+    # None for "skipped" and "completed", since neither is a failure.
+    semantic_error_code: str | None = None
 
     if rule_assessment.rule_verdict == "Phishing":
         semantic_status: SemanticStatus = "skipped"
@@ -217,7 +238,7 @@ def analyze_phishing(email_input: Path, mode: AnalysisMode = "fast") -> Phishing
     else:
         try:
             validation_result = analyze_semantic(facts)
-        except SemanticExtractionError:
+        except SemanticExtractionError as exc:
             # analyze_semantic() normalizes every expected failure mode
             # (malformed model output, underlying QwenService failure —
             # e.g. the GPU/Metal timeouts PROGRESS.md documents) to this
@@ -225,6 +246,7 @@ def analyze_phishing(email_input: Path, mode: AnalysisMode = "fast") -> Phishing
             # being folded in here — an unexpected exception is a bug in
             # the wiring, not a "semantic layer degraded gracefully" case.
             semantic_status = "failed"
+            semantic_error_code = exc.code
         else:
             semantic_status = "completed"
             accepted_findings = validation_result.accepted
@@ -241,17 +263,34 @@ def analyze_phishing(email_input: Path, mode: AnalysisMode = "fast") -> Phishing
     # analyze_phishing() always returns a usable report either way; only
     # report_source/llm_report_status say which generator actually wrote
     # it.
-    try:
-        report = generate_report(facts, rule_assessment, final_decision, accepted_findings)
-    except ReportGenerationError as exc:
+    #
+    # semantic_error_code == "model_call_failed" means the underlying
+    # QwenService itself failed (e.g. a GPU/Metal timeout) during the
+    # FIRST call within this same request — the same shared, lazily-
+    # loaded model instance (src/llm/service.py's "tek model, iki çağrı")
+    # would be used for the SECOND call too, so retrying it here would
+    # just reproduce the same infrastructure failure a few seconds later
+    # instead of skipping straight to the mechanical fallback. Any OTHER
+    # semantic failure code (currently only "invalid_json") means the
+    # model itself responded — the infrastructure is known-good, so a
+    # second, independent report call is still worth attempting.
+    if semantic_error_code == "model_call_failed":
         report = build_report(rule_assessment, decision=final_decision)
         report_source: ReportSource = "mechanical"
         llm_report_status: LLMReportStatus = "failed_fallback"
-        llm_report_error_code = exc.code
+        llm_report_error_code = semantic_error_code
     else:
-        report_source = "qwen"
-        llm_report_status = "completed"
-        llm_report_error_code = None
+        try:
+            report = generate_report(facts, rule_assessment, final_decision, accepted_findings)
+        except ReportGenerationError as exc:
+            report = build_report(rule_assessment, decision=final_decision)
+            report_source = "mechanical"
+            llm_report_status = "failed_fallback"
+            llm_report_error_code = exc.code
+        else:
+            report_source = "qwen"
+            llm_report_status = "completed"
+            llm_report_error_code = None
 
     return PhishingAnalysisResult(
         mode=mode,
