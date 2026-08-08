@@ -249,24 +249,21 @@
         <span class="filename" id="filename"></span>
         <span class="spacer"></span>
         <label class="toggle">
-          <input type="checkbox" id="llm">
-          LLM ile yaz <span style="color:var(--faint)">(~100 sn)</span>
-        </label>
-        <label class="toggle" id="constrainWrap" hidden>
-          <input type="checkbox" id="constrain">
-          Şema kısıtı
-          <span class="info" tabindex="0" role="button" aria-label="Şema kısıtı nedir">i
+          <input type="checkbox" id="hybrid">
+          Hybrid analiz
+          <span class="info" tabindex="0" role="button" aria-label="Hybrid analiz nedir">i
             <span class="bubble" role="tooltip">
-              <p><strong>Varsayılan kapalı — modelin gerçek davranışı bu.</strong>
-              Projenin ölçümleri (şema uyumu, groundedness) kısıtsız modda
-              yapıldı; demo da aynı koşulda çalışsın diye.</p>
-              <p>Açıldığında modelin ürettiği her token, rapor şemasının izin
-              verdiği alfabeyle sınırlanır — bozuk JSON üretmek yapısal olarak
-              imkânsız hale gelir.</p>
-              <p>Bir mailde üç deneme üst üste aynı hatayla başarısız olmuştu:
-              metnin içinde kaçışsız çift tırnak. Prompt'a kural yazmak
-              çözmedi, çünkü model "şu an bir JSON metninin içindeyim"
-              durumunu takip etmiyor. Kısıt bunu modelin dışında takip eder.</p>
+              <p><strong>Varsayılan kapalı — M2 Air'de ~70 saniye sürüyor.</strong>
+              Kapalıyken (fast) rapor tamamen kural motorundan, ~1 saniyede
+              üretilir.</p>
+              <p>Açıldığında (hybrid) rule engine kararından sonra Qwen3.5-9B
+              gövdeyi okuyup doğrulanabilir bulgular çıkarır; bu bulgular
+              kararı YALNIZCA belirli, dar koşullarda (ör. kimlik bilgisi
+              talebi + dış link) yükseltebilir.</p>
+              <p>Risk seviyesi, teknik bulgular ve önerilen aksiyon HER
+              ZAMAN deterministik üretilir — model bunlara asla karar
+              vermez. Qwen'in tek katkısı, "Güvenilir" olmayan kararlarda
+              rapora eklenen kısa bir senaryo anlatımıdır.</p>
             </span>
           </span>
         </label>
@@ -274,8 +271,8 @@
       </div>
     </div>
     <div class="hint">
-      Karar her iki modda da kural motorundan gelir. LLM yalnızca raporun
-      metnini yazar — sınıflandırma yapmaz.
+      Karar her iki modda da kural motorundan (ve hybrid'de karar
+      politikasından) gelir. Qwen sınıflandırma yapmaz.
     </div>
   </form>
 
@@ -289,17 +286,8 @@ const fileInput = document.getElementById('fileInput');
 const filenameEl = document.getElementById('filename');
 const composer = document.getElementById('composer');
 const sendBtn = document.getElementById('send');
-const llmEl = document.getElementById('llm');
-const constrainEl = document.getElementById('constrain');
-const constrainWrap = document.getElementById('constrainWrap');
+const hybridEl = document.getElementById('hybrid');
 const out = document.getElementById('out');
-
-// Şema kısıtı yalnızca LLM modunda anlamlı — mekanik raporda üretilen bir
-// metin yok. Hızlı moddayken gizli tutmak, kapalı ama görünür bir kutunun
-// yarattığı "bu neden çalışmıyor" sorusunu ortadan kaldırıyor.
-const syncConstrain = () => { constrainWrap.hidden = !llmEl.checked; };
-llmEl.addEventListener('change', syncConstrain);
-syncConstrain();
 
 let picked = null;
 
@@ -342,15 +330,14 @@ form.addEventListener('submit', async e => {
   e.preventDefault();
   if (!picked && !textEl.value.trim()) return;
 
-  const useLlm = llmEl.checked;
+  const useHybrid = hybridEl.checked;
   sendBtn.disabled = true;
   out.innerHTML = `<div class="status"><span class="dot"></span>` +
-    (useLlm ? 'Seneca raporu yazıyor — ilk çalıştırmada model yükleniyor, birkaç dakika sürebilir…'
-            : 'Analiz ediliyor…') + `</div>`;
+    (useHybrid ? 'Hybrid analiz çalışıyor — ilk istekte model yükleniyor, ~70 saniye sürebilir…'
+               : 'Analiz ediliyor…') + `</div>`;
 
   const fd = new FormData();
-  fd.append('mode', useLlm ? 'llm' : 'fast');
-  if (useLlm && constrainEl.checked) fd.append('constrain', '1');
+  fd.append('mode', useHybrid ? 'hybrid' : 'fast');
   if (picked) fd.append('file', picked);
   else fd.append('text', textEl.value);
 
@@ -391,22 +378,69 @@ function render(d) {
      <span class="sig-desc">${esc(s.description)}</span></li>`).join('');
 
   html += `<div class="card">
-    <div class="card-label">Kural motoru kararı</div>
+    <div class="card-label">Kural motoru kararı (rule verdict)</div>
     <div class="verdict-row">
       <span class="pill ${pillClass(d.verdict)}">${esc(d.verdict)}</span>
-      <span class="score">skor ${d.score} · eşikler: ≥${d.thresholds.phishing} Phishing,
-        ≥${d.thresholds.suspicious} Muhtemel</span>
+      <span class="score">skor ${d.score}</span>
     </div>
     ${sig ? `<ul class="signals">${sig}</ul>`
           : `<p class="none">Hiçbir sinyal tetiklenmedi.</p>`}
-    <div class="meta">${d.mode === 'llm' ? 'LLM ile yazıldı' : 'Mekanik rapor'}${d.constrained ? ' · şema kısıtlı' : ''} ·
+    <div class="meta">${d.mode === 'hybrid' ? 'hybrid analiz' : 'fast (mekanik)'} ·
       ${d.elapsed} sn</div>
   </div>`;
 
-  if (d.llm_error) {
-    html += `<div class="card"><div class="err">
-      <strong>LLM raporu üretilemedi</strong> — mekanik rapora düşüldü.<br>${esc(d.llm_error)}
-    </div></div>`;
+  // Hybrid moda özgü kartlar — fast modda bu alanların tamamı null/boş
+  // döner (analyze_phishing(mode="fast") hiçbir zaman final_decision/
+  // semantic_status üretmez), o yüzden mode kontrolüyle hiç render
+  // edilmiyor.
+  if (d.mode === 'hybrid') {
+    const findings = d.semantic_findings || { accepted: [], rejected: [] };
+    const acceptedHtml = findings.accepted.length
+      ? `<ul class="signals">${findings.accepted.map(f =>
+          `<li><span class="w">${esc(f.type)}</span>
+           <span class="sig-desc">"${esc(f.evidence)}" — ${esc(f.explanation)}
+           <span class="meta" style="display:inline">(güven ${f.model_confidence})</span></span></li>`
+        ).join('')}</ul>`
+      : `<p class="none">Kabul edilen bulgu yok.</p>`;
+    const rejectedHtml = findings.rejected.length
+      ? `<ul class="signals">${findings.rejected.map(f =>
+          `<li><span class="w neg">${esc(f.rejection_reason || '—')}</span>
+           <span class="sig-desc">${esc(typeof f.finding === 'string' ? f.finding : JSON.stringify(f.finding))}</span></li>`
+        ).join('')}</ul>`
+      : `<p class="none">Reddedilen bulgu yok.</p>`;
+
+    html += `<div class="card">
+      <div class="card-label">Semantik bulgular (Qwen3.5-9B)</div>
+      <div class="meta">durum: ${esc(d.semantic_status || '—')}${
+        d.semantic_skip_reason ? ` (${esc(d.semantic_skip_reason)})` : ''}</div>
+      <p class="meta" style="margin-top:.75rem">Kabul edilen</p>
+      ${acceptedHtml}
+      <p class="meta" style="margin-top:.75rem">Reddedilen</p>
+      ${rejectedHtml}
+    </div>`;
+
+    html += `<div class="card">
+      <div class="card-label">Nihai karar (final verdict)</div>
+      <div class="verdict-row">
+        <span class="pill ${pillClass(d.final_verdict)}">${esc(d.final_verdict || '—')}</span>
+        ${d.analyst_review_required ? `<span class="score">analist incelemesi gerekiyor</span>` : ''}
+      </div>
+      <div class="meta">decision_path: <code>${esc(d.decision_path || '—')}</code></div>
+    </div>`;
+
+    html += `<div class="card">
+      <div class="card-label">Narrative (Qwen'in rapor katkısı)</div>
+      <div class="meta">
+        report_source: ${esc(d.report_source || '—')} ·
+        narrative_status: ${esc(d.narrative_status || '—')}${
+          d.narrative_error_code ? ` (${esc(d.narrative_error_code)})` : ''}
+      </div>
+      ${d.narrative_status === 'failed_fallback'
+        ? `<p class="meta" style="margin-top:.4rem">Qwen'in senaryo anlatımı reddedildi/atlandı —
+           raporun geri kalanı (risk seviyesi, teknik bulgular, önerilen aksiyon) her zamanki gibi
+           deterministik, sadece genel değerlendirme mekanik metinle kaldı.</p>`
+        : ''}
+    </div>`;
   }
 
   // srcdoc ile yazılıyor, contentDocument.write ile değil: sandbox=""

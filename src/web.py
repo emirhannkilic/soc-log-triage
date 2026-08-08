@@ -4,33 +4,37 @@ Web arayüzü — terminal yerine tarayıcıdan kullanmak için ince bir katman.
 Hiçbir analiz mantığı burada YOK. İstek şu sırayla mevcut parçalara
 devrediliyor:
 
-    src/router.py   → girdi phishing hattına uygun mu?
-    src/parser      → .eml → facts
-    src/rules       → facts → verdict (KARAR BURADA)
-    src/teacher     → facts + verdict → Türkçe JSON rapor (opsiyonel)
-    templates/      → rapor → HTML
+    src/router.py             → girdi phishing hattına uygun mu?
+    src/workflows/phishing.py → .eml → facts → karar → rapor (KARAR BURADA)
+    templates/                → rapor → HTML
 
-Yani bu dosya bir kabuk: yeni bir karar yolu açmıyor, CLI'ın yaptığı işi
-tarayıcıya taşıyor. Kararın nerede verildiği değişmiyor.
+Yani bu dosya bir kabuk: yeni bir karar yolu açmıyor, hem "fast" hem
+"hybrid" modunu src/workflows/phishing.py::analyze_phishing()'e
+devrediyor — bu dosyada ikinci bir analiz implementasyonu YOK.
 
 İKİ MOD
-    hızlı (varsayılan): LLM hiç çağrılmaz, rapor kurallardan mekanik
-        üretilir — ~1 saniye. Verdict, skor ve bulgular LLM'li moddaki ile
-        BİREBİR aynı; farklı olan yalnızca metnin yazılmış değil mekanik
-        olması.
-    llm: Seneca raporu yazar — ~100 saniye. Model yüklü kalır, ikinci
-        istek daha hızlıdır.
+    fast (varsayılan): LLM hiç çağrılmaz, rapor kurallardan mekanik
+        üretilir — ~1 saniye. analyze_phishing(mode="fast").
+    hybrid: rule engine v1 → semantic extraction (Qwen3.5-9B) →
+        decision policy → mekanik rapor + (final_verdict != "Güvenilir"
+        ise) Qwen'in dar narrative katkısı — M2 Air'de ~70 saniye.
+        analyze_phishing(mode="hybrid"). Model süreçte tutuluyor
+        (src/llm/service.py::get_service() singleton'ı), ikinci istek
+        daha hızlıdır.
 
-Model, ilk LLM isteğinde yükleniyor ve süreçte tutuluyor: her istekte
-4GB'lık modeli yeniden yüklemek dakikalar sürerdi.
+    Önceki bir "llm" modu (Seneca + eski teacher prompt'u,
+    src/demo.py'nin --adapter/--constrain yolu) burada ARTIK YOK — o
+    yol hiçbir zaman hybrid mimariyle (Qwen3.5-9B semantic extraction +
+    decision policy) bağlı değildi, ayrı bir demo/eğitim hattıydı.
+    src/demo.py'de dosya/kod olarak hâlâ duruyor, sadece web
+    erişimi kaldırıldı — iki farklı "LLM analizi" kavramının web
+    arayüzünde karışmaması için.
 
 Çalıştırma:
     python3 src/web.py
     python3 src/web.py --port 8080 --host 0.0.0.0
 """
 import argparse
-import json
-import re
 import sys
 import tempfile
 import time
@@ -46,25 +50,13 @@ from fastapi.responses import HTMLResponse, JSONResponse  # noqa: E402
 
 from schemas.facts import EmailFacts  # noqa: E402
 from schemas.report import Report  # noqa: E402
-from src.parser.parse import parse_eml  # noqa: E402
-from src.report.mechanical import build_report  # noqa: E402
 from src.router import route  # noqa: E402
-from src.rules.adapters import from_v1  # noqa: E402
-from src.rules.engine import evaluate, load_rules  # noqa: E402
-from src.workflows.phishing import analyze_phishing  # noqa: E402
+from src.workflows.phishing import PhishingAnalysisResult, analyze_phishing  # noqa: E402
 
-MODEL_PATH = (PROJECT_ROOT / "models" /
-              "Seneca-Cybersecurity-LLM_x_Qwen2.5-7B-CyberSecurity-mlx-4bit")
 TEMPLATE_PATH = PROJECT_ROOT / "templates" / "report.html.j2"
 UI_PATH = Path(__file__).resolve().parent / "web_ui.html"
 
 app = FastAPI(title="soc-log-triage")
-
-# Loaded lazily and kept for the process lifetime — a 4GB model reloaded per
-# request would cost minutes each time.
-_model = None
-_tokenizer = None
-_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _render_report_html(report: Report, facts: EmailFacts) -> str:
@@ -84,84 +76,33 @@ def _render_report_html(report: Report, facts: EmailFacts) -> str:
     )
 
 
-def _extract_json(raw_text: str) -> dict | None:
-    text = raw_text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[len("json"):]
-    m = _JSON_BLOCK_RE.search(text)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return None
-
-
-def _load_model():
-    global _model, _tokenizer
-    if _model is None:
-        from mlx_lm import load
-        print("Seneca yükleniyor (ilk LLM isteği)…", file=sys.stderr)
-        _model, _tokenizer = load(str(MODEL_PATH))
-        print("Model yüklendi.", file=sys.stderr)
-    return _model, _tokenizer
-
-
-def _report_via_llm(facts: EmailFacts, verdict,
-                    constrain: bool = False) -> tuple[Report | None, str | None]:
-    """Returns (report, error). Never repairs malformed output.
-
-    CLAUDE.md "Yapılmayacaklar" forbids patching model output: a schema
-    violation is a real result, and hiding it would misrepresent what the
-    model does. Adım 10 measured this failing on 2 of 27 emails.
-    """
-    from mlx_lm import generate
-
-    from src.demo import _load_few_shot
-    from src.teacher.prompts import build_messages
-
-    model, tokenizer = _load_model()
-    rules = load_rules()
-    messages = build_messages(facts, verdict, few_shot=_load_few_shot(rules))
-    prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True)
-
-    # Opt-in, mirroring src/demo.py: the default has to be the model's real
-    # behaviour, because that is the condition every reported number was
-    # measured under.
-    kwargs = {"max_tokens": 1200, "verbose": False}
-    if constrain:
-        from mlx_vlm.structured import build_json_schema_logits_processor
-        from transformers import AutoTokenizer
-        # llguidance needs the HuggingFace tokenizer, not mlx_lm's
-        # TokenizerWrapper — the wrapper raises "Only fast tokenizers are
-        # supported". generate() still uses the wrapper.
-        hf_tokenizer = AutoTokenizer.from_pretrained(str(MODEL_PATH))
-        kwargs["logits_processors"] = [
-            build_json_schema_logits_processor(
-                hf_tokenizer, Report.model_json_schema())
-        ]
-
-    raw = generate(model, tokenizer, prompt, **kwargs)
-    parsed = _extract_json(raw)
-    if parsed is None:
-        return None, ("Model geçerli JSON üretmedi. Çıktı onarılmıyor "
-                      "(bilinçli karar) — hızlı modu deneyin ya da tekrar "
-                      "çalıştırın.")
-    try:
-        report = Report(**parsed)
-    except Exception as e:
-        return None, f"Model çıktısı rapor şemasına uymuyor: {e}"
-
-    # The model must echo the rule engine's decision, never override it.
-    # This check is what makes "the LLM does not classify" enforceable.
-    if report.risk_seviyesi != verdict.verdict:
-        return None, (f"Model risk_seviyesi'ni '{report.risk_seviyesi}' yazdı "
-                      f"ama rule engine '{verdict.verdict}' dedi. Karar rule "
-                      f"engine'in; uyuşmayan çıktı kabul edilmiyor.")
-    return report, None
+def _semantic_findings_json(analysis: PhishingAnalysisResult) -> dict:
+    """Serializes accepted/rejected semantic findings for the JSON
+    response — kept as a small, explicit projection rather than
+    model_dump()'ing the raw objects, since rejected_findings'
+    `finding` field can hold an arbitrary JSON-decoded value (a dict,
+    str, or even None — see src/semantic/validate.py's ValidatedFinding
+    docstring), which is not always safely JSON-serializable as-is."""
+    accepted = [
+        {
+            "type": f.type.value,
+            "evidence": f.evidence,
+            "explanation": f.explanation,
+            "model_confidence": f.model_confidence,
+        }
+        for f in analysis.accepted_findings
+    ]
+    rejected = [
+        {
+            "rejection_reason": vf.rejection_reason.value if vf.rejection_reason else None,
+            # finding is best-effort here — a raw, not-yet-validated
+            # candidate can be almost any JSON-decoded shape.
+            "finding": vf.finding if isinstance(vf.finding, (dict, str, int, float, bool, type(None)))
+            else str(vf.finding),
+        }
+        for vf in analysis.rejected_findings
+    ]
+    return {"accepted": accepted, "rejected": rejected}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -173,10 +114,12 @@ def index() -> str:
 async def analyze(
     text: str = Form(default=""),
     mode: str = Form(default="fast"),
-    constrain: str = Form(default=""),
     file: UploadFile | None = File(default=None),
 ) -> JSONResponse:
     t0 = time.time()
+
+    if mode not in ("fast", "hybrid"):
+        return JSONResponse({"error": f"bilinmeyen mode: {mode!r}"}, status_code=400)
 
     # --- 1. Routing -------------------------------------------------------
     tmp_path = None
@@ -217,64 +160,56 @@ async def analyze(
             tmp.write(decision.raw_email or "")
             tmp_path = Path(tmp.name)
 
-    # --- 3/4. Rule engine + report ------------------------------------
-    # "fast" goes through the shared workflow (src/workflows/phishing.py)
-    # so this endpoint isn't a second implementation of
-    # parse -> rule engine -> report. "llm" still parses and evaluates
-    # separately: _report_via_llm needs the raw v1 Verdict to build a
-    # Qwen-written report, which is a different thing from
-    # analyze_phishing's mode="hybrid" (semantic extraction -> decision
-    # policy -> still-mechanical report, no LLM report writer yet — see
-    # analyze_phishing's docstring). Neither this endpoint's "llm" mode
-    # nor the semantic/decision layer are wired together yet.
-    rules = load_rules()
-    if mode == "llm":
-        try:
-            facts = parse_eml(tmp_path)
-        except Exception as e:
-            tmp_path.unlink(missing_ok=True)
-            return JSONResponse(
-                {"routing": routing, "accepted": True,
-                 "error": f"E-posta ayrıştırılamadı: {e}"},
-                status_code=400)
-        verdict = evaluate(facts.flat_signals(), rules)
-        rule_assessment = from_v1(verdict, rules)
-        report, error = _report_via_llm(facts, verdict,
-                                        constrain=constrain == "1")
-        if report is None:
-            report = build_report(rule_assessment)
-    else:
-        try:
-            analysis = analyze_phishing(tmp_path, mode="fast")
-        except Exception as e:
-            tmp_path.unlink(missing_ok=True)
-            return JSONResponse(
-                {"routing": routing, "accepted": True,
-                 "error": f"E-posta ayrıştırılamadı: {e}"},
-                status_code=400)
-        facts = analysis.facts
-        rule_assessment = analysis.rule_assessment
-        report = analysis.report
-        error = None
+    # --- 3/4. Analysis + report --------------------------------------
+    # Both modes go through the SAME shared workflow
+    # (src/workflows/phishing.py::analyze_phishing) — this endpoint is
+    # not a second implementation of parse -> rule engine -> decision ->
+    # report for either mode.
+    try:
+        analysis = analyze_phishing(tmp_path, mode=mode)
+    except Exception as e:
+        tmp_path.unlink(missing_ok=True)
+        return JSONResponse(
+            {"routing": routing, "accepted": True,
+             "error": f"E-posta analiz edilemedi: {e}"},
+            status_code=400)
+
+    facts = analysis.facts
+    rule_assessment = analysis.rule_assessment
+    report = analysis.report
 
     signals = [{"weight": e.weight, "description": e.description}
                for e in rule_assessment.evidence]
     html = _render_report_html(report, facts)
     tmp_path.unlink(missing_ok=True)
 
-    return JSONResponse({
+    fd = analysis.final_decision
+    response = {
         "routing": routing,
         "accepted": True,
+        "mode": mode,
+        # Kural motorunun HAM kararı — hybrid modda semantik katman
+        # tarafından yükseltilmiş olabilecek final_verdict'ten AYRI
+        # gösteriliyor, ikisi arasındaki farkın kendisi bir bilgi.
         "verdict": rule_assessment.rule_verdict,
         "score": rule_assessment.score,
         "signals": signals,
-        "thresholds": rules["thresholds"],
         "report_html": html,
-        "mode": mode,
-        "constrained": bool(constrain == "1" and mode == "llm"),
-        "llm_error": error,
         "elapsed": round(time.time() - t0, 1),
-    })
+        # Aşağıdaki alanların TAMAMI fast modda None/boş kalır —
+        # analyze_phishing(mode="fast") hiçbir zaman final_decision/
+        # semantic_status üretmiyor (bkz. o fonksiyonun docstring'i).
+        "semantic_status": analysis.semantic_status,
+        "semantic_skip_reason": analysis.semantic_skip_reason,
+        "semantic_findings": _semantic_findings_json(analysis),
+        "final_verdict": fd.final_verdict if fd else None,
+        "decision_path": fd.decision_path if fd else None,
+        "analyst_review_required": fd.analyst_review_required if fd else None,
+        "report_source": analysis.report_source,
+        "narrative_status": analysis.narrative_status,
+        "narrative_error_code": analysis.narrative_error_code,
+    }
+    return JSONResponse(response)
 
 
 def main() -> None:

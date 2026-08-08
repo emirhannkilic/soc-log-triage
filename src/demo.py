@@ -76,7 +76,7 @@ from schemas.facts import EmailFacts  # noqa: E402
 from schemas.report import Report  # noqa: E402
 from src.parser.parse import parse_eml  # noqa: E402
 from src.rules.engine import Verdict, evaluate, load_rules  # noqa: E402
-from src.workflows.phishing import analyze_phishing  # noqa: E402
+from src.workflows.phishing import PhishingAnalysisResult, analyze_phishing  # noqa: E402
 
 MODEL_PATH = PROJECT_ROOT / "models" / "Seneca-Cybersecurity-LLM_x_Qwen2.5-7B-CyberSecurity-mlx-4bit"
 ADAPTER_DIR = PROJECT_ROOT / "models" / "lora_adapters"
@@ -300,6 +300,54 @@ def _report_from_llm(facts: EmailFacts, verdict: Verdict, rules: dict,
     return report
 
 
+def _print_hybrid_summary(analysis: PhishingAnalysisResult) -> None:
+    """Prints the hybrid pipeline's stages as separate, labeled sections
+    — rule verdict, semantic findings (accepted/rejected), final
+    verdict, decision path, narrative status — mirroring scripts/
+    smoke_test_hybrid.py's terminal output shape. No new analysis logic
+    here: every value printed comes straight from analyze_phishing()'s
+    own result, this function only formats it for the terminal."""
+    ra = analysis.rule_assessment
+    print(f"\n[Rule verdict] {ra.rule_verdict} "
+          f"({'skor ' + format(ra.score, 'g') if ra.score is not None else f'toplam {ra.total}'})",
+          file=sys.stderr)
+    for e in ra.evidence:
+        sign = "+" if e.weight >= 0 else ""
+        print(f"    {sign}{e.weight:g}  {e.description}", file=sys.stderr)
+    if not ra.evidence:
+        print("    (hiçbir sinyal tetiklenmedi)", file=sys.stderr)
+
+    print(f"\n[Semantic extraction] durum={analysis.semantic_status}"
+          + (f" ({analysis.semantic_skip_reason})" if analysis.semantic_skip_reason else ""),
+          file=sys.stderr)
+    if analysis.accepted_findings:
+        print(f"    kabul edilen ({len(analysis.accepted_findings)}):", file=sys.stderr)
+        for f in analysis.accepted_findings:
+            print(f"      [{f.type.value}] \"{f.evidence}\" (güven {f.model_confidence:.2f})"
+                  f" — {f.explanation}", file=sys.stderr)
+    else:
+        print("    kabul edilen bulgu yok", file=sys.stderr)
+    if analysis.rejected_findings:
+        print(f"    reddedilen ({len(analysis.rejected_findings)}):", file=sys.stderr)
+        for vf in analysis.rejected_findings:
+            reason = vf.rejection_reason.value if vf.rejection_reason else "?"
+            print(f"      [{reason}] {vf.finding!r}", file=sys.stderr)
+    else:
+        print("    reddedilen bulgu yok", file=sys.stderr)
+
+    fd = analysis.final_decision
+    if fd is not None:
+        print(f"\n[Final verdict] {fd.final_verdict} "
+              f"(decision_path={fd.decision_path}, "
+              f"analyst_review_required={fd.analyst_review_required})", file=sys.stderr)
+
+    print(f"\n[Narrative] report_source={analysis.report_source}, "
+          f"narrative_status={analysis.narrative_status}"
+          + (f", narrative_error_code={analysis.narrative_error_code}"
+             if analysis.narrative_error_code else ""),
+          file=sys.stderr)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Bir .eml dosyasını analiz edip HTML rapor üretir.")
@@ -308,6 +356,13 @@ def main() -> None:
                     help="çıktı HTML yolu (varsayılan: <eml adı>_rapor.html)")
     ap.add_argument("--no-llm", action="store_true",
                     help="modeli hiç çağırma, raporu kurallardan mekanik üret (~1 sn)")
+    ap.add_argument("--hybrid", action="store_true",
+                    help="src/workflows/phishing.py::analyze_phishing(mode='hybrid') "
+                         "çalıştır — rule engine v1 → Qwen3.5-9B semantic extraction → "
+                         "decision policy → mekanik rapor + (Güvenilir değilse) Qwen'in "
+                         "dar narrative katkısı. --adapter/--constrain/--shadow-classify "
+                         "ile birlikte kullanılamaz (bunlar ayrı, Seneca+LoRA teacher "
+                         "demo yoluna ait). M2 Air'de ~70 saniye sürer.")
     ap.add_argument("--adapter", metavar="CHECKPOINT",
                     help="LoRA adapter'ı yükle (örn. 0000400). Varsayılan kapalı — "
                          "Adım 10'da adapter her iki metrikte de baseline'dan kötü çıktı.")
@@ -330,8 +385,24 @@ def main() -> None:
     if args.no_llm and args.adapter:
         raise SystemExit("--no-llm ile --adapter birlikte kullanılamaz "
                          "(--no-llm modelin tamamını atlıyor).")
+    if args.hybrid and (args.no_llm or args.adapter or args.constrain or args.shadow_classify):
+        raise SystemExit("--hybrid, --no-llm/--adapter/--constrain/--shadow-classify ile "
+                         "birlikte kullanılamaz — bunlar ayrı, Seneca+LoRA teacher demo "
+                         "yoluna ait, --hybrid ise src/workflows/phishing.py'nin Qwen3.5-9B "
+                         "hattını kullanır.")
 
     out_path = args.out or args.eml.with_name(f"{args.eml.stem}_rapor.html")
+
+    if args.hybrid:
+        print(f"[1/2] analyze_phishing(mode='hybrid') çalıştırılıyor: {args.eml.name} "
+              f"(ilk çalıştırmada model yükleniyor, ~70 saniye sürebilir) …", file=sys.stderr)
+        analysis = analyze_phishing(args.eml, mode="hybrid")
+        _print_hybrid_summary(analysis)
+        _render(analysis.report, analysis.facts, out_path)
+        print(f"[2/2] Rapor yazıldı: {out_path}", file=sys.stderr)
+        if args.open:
+            webbrowser.open(out_path.resolve().as_uri())
+        return
 
     print(f"[1/4] Parse ediliyor: {args.eml.name}", file=sys.stderr)
     facts = parse_eml(args.eml)
