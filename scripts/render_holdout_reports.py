@@ -9,6 +9,13 @@ meant to read like the teacher's future Turkish prose (see CLAUDE.md
 "Teacher generation ayarları" — that's a distinct, more careful step).
 
 Output: data/holdout/reports/candidate_<N>.html (one per hold-out email).
+
+build_report() itself now lives in src/report/mechanical.py
+(PHISHING_ROUTING_PLAN.md step 4 follow-up) — it takes a RuleAssessment,
+not a raw v1 Verdict, so demo.py/web.py/workflows/phishing.py don't
+depend on a scripts/ module for report generation. Re-exported here so
+this script's own main() and any external caller of
+"from render_holdout_reports import build_report" keep working.
 """
 import json
 import sys
@@ -20,63 +27,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import jinja2  # noqa: E402
 
 from schemas.facts import EmailFacts  # noqa: E402
-from schemas.report import Report, TechnicalFinding  # noqa: E402
-from src.rules.engine import RuleMatch, Verdict, evaluate, load_rules  # noqa: E402
+from src.report.mechanical import build_report  # noqa: E402
+from src.rules.adapters import from_v1  # noqa: E402
+from src.rules.engine import evaluate, load_rules  # noqa: E402
 
 CANDIDATES_PATH = PROJECT_ROOT / "data" / "holdout" / "candidates.jsonl"
 TEMPLATE_PATH = PROJECT_ROOT / "templates" / "report.html.j2"
 OUT_DIR = PROJECT_ROOT / "data" / "holdout" / "reports"
 
 METADATA_KEYS = ("source_label", "_eml_path", "is_spam_not_phishing", "spam_reason")
-
-_SONUC_BY_VERDICT = {
-    "Phishing": (
-        "Bu e-posta, rule engine tarafından toplam {score} puanla Phishing "
-        "olarak sınıflandırıldı. Aşağıdaki teknik bulgular bu kararı destekliyor."
-    ),
-    "Muhtemel Phishing": (
-        "Bu e-posta, rule engine tarafından toplam {score} puanla Muhtemel "
-        "Phishing olarak sınıflandırıldı. Kesin bir karar için analist "
-        "incelemesi gerekiyor."
-    ),
-    "Güvenilir": (
-        "Bu e-posta, rule engine tarafından toplam {score} puanla Güvenilir "
-        "olarak sınıflandırıldı. Aşağıdaki bulgular bu değerlendirmeyi destekliyor."
-    ),
-}
-
-_ONERI_BY_VERDICT = {
-    "Phishing": "E-postayı silin, linklere tıklamayın, ekleri açmayın ve gönderen adresi engelleyin.",
-    "Muhtemel Phishing": "E-postadaki linklere/eklere etkileşimde bulunmadan önce SOC analistine iletin.",
-    "Güvenilir": "Ek bir aksiyon gerekmiyor.",
-}
-
-
-def _finding_from_match(m: RuleMatch) -> TechnicalFinding:
-    sign = "+" if m.weight >= 0 else ""
-    return TechnicalFinding(
-        baslik=m.signal.replace("_", " "),
-        aciklama=f"{m.description} ({sign}{m.weight} puan)",
-    )
-
-
-def build_report(signals: dict, verdict: Verdict) -> Report:
-    findings = [_finding_from_match(m) for m in verdict.matches]
-    gostergeler = [m.description for m in verdict.matches if m.weight > 0]
-
-    return Report(
-        risk_seviyesi=verdict.verdict,
-        sonuc_ve_gerekce=_SONUC_BY_VERDICT[verdict.verdict].format(score=verdict.score),
-        genel_degerlendirme=(
-            f"Toplam {len(verdict.matches)} sinyal değerlendirildi, "
-            f"skor {verdict.score} (eşikler: >= "
-            f"{load_rules()['thresholds']['phishing']} Phishing, "
-            f">= {load_rules()['thresholds']['suspicious']} Muhtemel Phishing)."
-        ),
-        teknik_bulgular=findings,
-        phishing_gostergeleri=gostergeler,
-        onerilen_aksiyon=_ONERI_BY_VERDICT[verdict.verdict],
-    )
 
 
 def main():
@@ -101,7 +60,7 @@ def main():
         facts = EmailFacts(**facts_dict)
         signals = facts.flat_signals()
         verdict = evaluate(signals, rules)
-        report = build_report(signals, verdict)
+        report = build_report(from_v1(verdict, rules))
 
         html = template.render(
             **report.model_dump(),

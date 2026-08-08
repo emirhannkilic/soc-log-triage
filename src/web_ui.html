@@ -372,9 +372,11 @@ function render(d) {
       <span class="pill ${d.accepted ? 'guvenilir' : 'reject'}">
         ${d.accepted ? 'phishing hattı' : 'kabul edilmedi'}
       </span>
-      <span class="score">kural: ${esc(r.rule || '—')}</span>
+      <span class="score">${esc(r.status || '—')} · ${esc(r.reason_code || '—')}</span>
     </div>
-    <div class="route-line" style="margin-top:.6rem">${esc(r.reason || '')}</div>
+    <div class="route-line" style="margin-top:.6rem">${esc(r.message || r.reason || '')}</div>
+    <div class="meta">kural: ${esc(r.matched_rule || r.rule || '—')} · kaynak:
+      ${esc(r.confidence_source || '—')}</div>
   </div>`;
 
   if (!d.accepted) { out.innerHTML = html; return; }

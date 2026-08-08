@@ -76,6 +76,7 @@ from schemas.facts import EmailFacts  # noqa: E402
 from schemas.report import Report  # noqa: E402
 from src.parser.parse import parse_eml  # noqa: E402
 from src.rules.engine import Verdict, evaluate, load_rules  # noqa: E402
+from src.workflows.phishing import analyze_phishing  # noqa: E402
 
 MODEL_PATH = PROJECT_ROOT / "models" / "Seneca-Cybersecurity-LLM_x_Qwen2.5-7B-CyberSecurity-mlx-4bit"
 ADAPTER_DIR = PROJECT_ROOT / "models" / "lora_adapters"
@@ -365,10 +366,10 @@ def main() -> None:
                   f"dil={result.language}", file=sys.stderr)
 
     if args.no_llm:
-        from render_holdout_reports import build_report
         print("[2/4] LLM atlandı (--no-llm)", file=sys.stderr)
         print("[3/4] Rapor kurallardan mekanik üretiliyor", file=sys.stderr)
-        report = build_report(signals, verdict)
+        analysis = analyze_phishing(args.eml, mode="fast")
+        report = analysis.report
     else:
         report = _report_from_llm(facts, verdict, rules, args.adapter,
                                   constrain=args.constrain)

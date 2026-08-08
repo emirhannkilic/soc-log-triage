@@ -47,8 +47,11 @@ from fastapi.responses import HTMLResponse, JSONResponse  # noqa: E402
 from schemas.facts import EmailFacts  # noqa: E402
 from schemas.report import Report  # noqa: E402
 from src.parser.parse import parse_eml  # noqa: E402
-from src.router import Route, route  # noqa: E402
+from src.report.mechanical import build_report  # noqa: E402
+from src.router import route  # noqa: E402
+from src.rules.adapters import from_v1  # noqa: E402
 from src.rules.engine import evaluate, load_rules  # noqa: E402
+from src.workflows.phishing import analyze_phishing  # noqa: E402
 
 MODEL_PATH = (PROJECT_ROOT / "models" /
               "Seneca-Cybersecurity-LLM_x_Qwen2.5-7B-CyberSecurity-mlx-4bit")
@@ -193,13 +196,13 @@ async def analyze(
         # CLI router, which runs on every request).
         decision = route(text=text, use_classifier=True)
 
-    routing = {
-        "route": decision.route.value,
-        "rule": decision.matched_rule,
-        "reason": decision.reason,
-    }
+    routing = decision.as_dict()
+    # Temporary compatibility keys for the current UI. New consumers should
+    # use matched_rule/message from the stable routing contract.
+    routing["rule"] = decision.matched_rule
+    routing["reason"] = decision.reason
 
-    if decision.route is not Route.PHISHING:
+    if not decision.accepted:
         if tmp_path:
             tmp_path.unlink(missing_ok=True)
         return JSONResponse({"routing": routing, "accepted": False})
@@ -214,41 +217,56 @@ async def analyze(
             tmp.write(decision.raw_email or "")
             tmp_path = Path(tmp.name)
 
-    try:
-        facts = parse_eml(tmp_path)
-    except Exception as e:
-        tmp_path.unlink(missing_ok=True)
-        return JSONResponse(
-            {"routing": routing, "accepted": True,
-             "error": f"E-posta ayrıştırılamadı: {e}"},
-            status_code=400)
-
-    # --- 3. Rule engine — the decision ------------------------------------
+    # --- 3/4. Rule engine + report ------------------------------------
+    # "fast" goes through the shared workflow (src/workflows/phishing.py)
+    # so this endpoint isn't a second implementation of
+    # parse -> rule engine -> report. "llm" still parses and evaluates
+    # separately: _report_via_llm needs the raw v1 Verdict to build a
+    # Qwen-written report, which is a different thing from
+    # analyze_phishing's mode="hybrid" (semantic extraction -> decision
+    # policy -> still-mechanical report, no LLM report writer yet — see
+    # analyze_phishing's docstring). Neither this endpoint's "llm" mode
+    # nor the semantic/decision layer are wired together yet.
     rules = load_rules()
-    verdict = evaluate(facts.flat_signals(), rules)
-    signals = [{"weight": m.weight, "description": m.description}
-               for m in verdict.matches]
-
-    # --- 4. Report --------------------------------------------------------
-    error = None
     if mode == "llm":
+        try:
+            facts = parse_eml(tmp_path)
+        except Exception as e:
+            tmp_path.unlink(missing_ok=True)
+            return JSONResponse(
+                {"routing": routing, "accepted": True,
+                 "error": f"E-posta ayrıştırılamadı: {e}"},
+                status_code=400)
+        verdict = evaluate(facts.flat_signals(), rules)
+        rule_assessment = from_v1(verdict, rules)
         report, error = _report_via_llm(facts, verdict,
                                         constrain=constrain == "1")
         if report is None:
-            from render_holdout_reports import build_report
-            report = build_report(facts.flat_signals(), verdict)
+            report = build_report(rule_assessment)
     else:
-        from render_holdout_reports import build_report
-        report = build_report(facts.flat_signals(), verdict)
+        try:
+            analysis = analyze_phishing(tmp_path, mode="fast")
+        except Exception as e:
+            tmp_path.unlink(missing_ok=True)
+            return JSONResponse(
+                {"routing": routing, "accepted": True,
+                 "error": f"E-posta ayrıştırılamadı: {e}"},
+                status_code=400)
+        facts = analysis.facts
+        rule_assessment = analysis.rule_assessment
+        report = analysis.report
+        error = None
 
+    signals = [{"weight": e.weight, "description": e.description}
+               for e in rule_assessment.evidence]
     html = _render_report_html(report, facts)
     tmp_path.unlink(missing_ok=True)
 
     return JSONResponse({
         "routing": routing,
         "accepted": True,
-        "verdict": verdict.verdict,
-        "score": verdict.score,
+        "verdict": rule_assessment.rule_verdict,
+        "score": rule_assessment.score,
         "signals": signals,
         "thresholds": rules["thresholds"],
         "report_html": html,
