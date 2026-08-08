@@ -1,10 +1,12 @@
 """Unit tests for src/workflows/phishing.py (PHISHING_ROUTING_PLAN.md
-"hybrid workflow wiring" task). Covers both mode="fast" (unchanged) and
+"hybrid workflow wiring" task, extended by the "final rapor prompt ve
+şemasını güncellemek" task). Covers both mode="fast" (unchanged) and
 mode="hybrid" (parse -> rule engine -> semantic extraction -> decision
-policy -> mechanical report). analyze_semantic() is mocked throughout —
-these are workflow-wiring tests, not a real Qwen3.5-9B smoke test (that
-already exists separately, see src/semantic/smoke_test.py and
-scripts/evaluate_semantic_extractor.py)."""
+policy -> Qwen report generation, falling back to the mechanical report
+on failure). analyze_semantic() and generate_report() are mocked
+throughout — these are workflow-wiring tests, not a real Qwen3.5-9B
+smoke test (that already exists separately, see src/semantic/
+smoke_test.py and scripts/evaluate_semantic_extractor.py)."""
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import src.workflows.phishing as wf  # noqa: E402
 from schemas.semantic import SemanticFindingType, ValidatedSemanticFinding  # noqa: E402
+from src.report.generate import ReportGenerationError  # noqa: E402
 from src.semantic.analyze import SemanticExtractionError  # noqa: E402
 from src.semantic.validate import (  # noqa: E402
     RejectionReason,
@@ -41,6 +44,33 @@ def _finding(type_, evidence="x" * 10, confidence=0.9) -> ValidatedSemanticFindi
     )
 
 
+def _qwen_report(verdict: str):
+    """A minimal, schema-valid Report generate_report() could plausibly
+    return for the given verdict — used to mock the Qwen success path
+    without a real model call."""
+    from schemas.report import Report
+
+    return Report(
+        risk_seviyesi=verdict,
+        sonuc_ve_gerekce="Bu karar; kimlik ve marka taklidi kategorisinin değerlendirilmesine dayanır.",
+        genel_degerlendirme="Olası senaryo: test. Alıcıdan beklenen eylem: test. Olası zarar: test.",
+        teknik_bulgular=[],
+        phishing_gostergeleri=[],
+        onerilen_aksiyon="Test.",
+    )
+
+
+def _mock_qwen_success():
+    """generate_report() replacement that echoes decision.final_verdict —
+    used by tests that only care about final_decision/report_source
+    wiring, not the report TEXT (that's src/report/prompts.py's and
+    src/report/generate.py's own test files' job)."""
+    def fake_generate_report(facts, rule_assessment, decision, accepted_findings):
+        return _qwen_report(decision.final_verdict)
+
+    return MagicMock(side_effect=fake_generate_report)
+
+
 def test_fast_mode_returns_result_with_matching_verdict():
     result = analyze_phishing(SAMPLE_EML, mode="fast")
 
@@ -55,6 +85,10 @@ def test_fast_mode_returns_result_with_matching_verdict():
     assert result.semantic_status is None
     assert result.accepted_findings == []
     assert result.rejected_findings == []
+    # fast mode never calls the LLM report generator either.
+    assert result.report_source == "mechanical"
+    assert result.llm_report_status == "not_requested"
+    assert result.llm_report_error_code is None
 
 
 def test_fast_mode_defaults_when_mode_omitted():
@@ -78,7 +112,8 @@ def test_hybrid_mode_skips_semantic_call_when_already_phishing():
     called at all — this is the cheap-tier-first principle CLAUDE.md
     documents for every layer of this system."""
     mock_analyze = MagicMock()
-    with patch.object(wf, "analyze_semantic", mock_analyze):
+    with patch.object(wf, "analyze_semantic", mock_analyze), \
+         patch.object(wf, "generate_report", _mock_qwen_success()):
         result = analyze_phishing(PHISHING_SAMPLE_EML, mode="hybrid")
 
     assert result.rule_assessment.rule_verdict == "Phishing"
@@ -90,6 +125,9 @@ def test_hybrid_mode_skips_semantic_call_when_already_phishing():
     assert result.report.risk_seviyesi == "Phishing"
     assert result.accepted_findings == []
     assert result.rejected_findings == []
+    assert result.report_source == "qwen"
+    assert result.llm_report_status == "completed"
+    assert result.llm_report_error_code is None
 
 
 # --- hybrid mode: semantic model failure never loses the deterministic verdict ---
@@ -105,7 +143,7 @@ def test_hybrid_mode_semantic_extraction_error_invalid_json_falls_back_to_rule_v
     with patch.object(
         wf, "analyze_semantic",
         side_effect=SemanticExtractionError(code="invalid_json", message="bad json"),
-    ):
+    ), patch.object(wf, "generate_report", _mock_qwen_success()):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.semantic_status == "failed"
@@ -125,7 +163,7 @@ def test_hybrid_mode_semantic_extraction_error_model_call_failed_also_falls_back
     with patch.object(
         wf, "analyze_semantic",
         side_effect=SemanticExtractionError(code="model_call_failed", message="GPU Timeout"),
-    ):
+    ), patch.object(wf, "generate_report", _mock_qwen_success()):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.semantic_status == "failed"
@@ -151,7 +189,8 @@ def test_hybrid_mode_completed_credential_request_upgrades_with_url():
     finding = _finding(SemanticFindingType.CREDENTIAL_REQUEST)
     validation_result = ValidationResult(accepted=[finding], rejected=[])
 
-    with patch.object(wf, "analyze_semantic", return_value=validation_result):
+    with patch.object(wf, "analyze_semantic", return_value=validation_result), \
+         patch.object(wf, "generate_report", _mock_qwen_success()):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.semantic_status == "completed"
@@ -161,14 +200,13 @@ def test_hybrid_mode_completed_credential_request_upgrades_with_url():
     assert result.final_decision.final_verdict == "Muhtemel Phishing"
     assert result.final_decision.decision_path == "credential_request_plus_url_upgrade"
     assert result.final_decision.analyst_review_required is True
-    # The mechanical report must reflect the UPGRADED verdict, not the
-    # stale rule_verdict — this is the invariant the user required.
+    # The report must reflect the UPGRADED verdict, not the stale
+    # rule_verdict — this is the invariant the user required.
     assert result.report.risk_seviyesi == result.final_decision.final_verdict
     assert result.report.risk_seviyesi == "Muhtemel Phishing"
-    # The upgrade's rationale must be visible in the report text, not
-    # just carried silently on final_decision.
-    assert "kimlik bilgisi talebi" in result.report.genel_degerlendirme
     assert result.accepted_findings == [finding]
+    assert result.report_source == "qwen"
+    assert result.llm_report_status == "completed"
 
 
 def test_hybrid_mode_completed_no_upgrade_condition_keeps_rule_verdict():
@@ -178,7 +216,8 @@ def test_hybrid_mode_completed_no_upgrade_condition_keeps_rule_verdict():
     finding = _finding(SemanticFindingType.URGENCY_OR_PRESSURE)
     validation_result = ValidationResult(accepted=[finding], rejected=[])
 
-    with patch.object(wf, "analyze_semantic", return_value=validation_result):
+    with patch.object(wf, "analyze_semantic", return_value=validation_result), \
+         patch.object(wf, "generate_report", _mock_qwen_success()):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.final_decision.final_verdict == "Güvenilir"
@@ -197,7 +236,8 @@ def test_hybrid_mode_rejected_findings_are_carried_but_not_used_by_policy():
     )
     validation_result = ValidationResult(accepted=[], rejected=[rejected])
 
-    with patch.object(wf, "analyze_semantic", return_value=validation_result):
+    with patch.object(wf, "analyze_semantic", return_value=validation_result), \
+         patch.object(wf, "generate_report", _mock_qwen_success()):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.semantic_status == "completed"
@@ -222,11 +262,87 @@ def test_hybrid_mode_parses_email_exactly_once():
         call_count["n"] += 1
         return real_parse_eml(path)
 
-    with patch.object(wf, "parse_eml", side_effect=counting_parse_eml), \
+    with patch.object(wf, "generate_report", _mock_qwen_success()), \
+         patch.object(wf, "parse_eml", side_effect=counting_parse_eml), \
          patch.object(wf, "analyze_semantic", return_value=validation_result):
         analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert call_count["n"] == 1
+
+
+# --- hybrid mode: report generation, Qwen success vs. fallback ---
+
+def test_hybrid_mode_qwen_report_success_sets_source_and_status():
+    finding = _finding(SemanticFindingType.URGENCY_OR_PRESSURE)
+    validation_result = ValidationResult(accepted=[finding], rejected=[])
+
+    with patch.object(wf, "analyze_semantic", return_value=validation_result), \
+         patch.object(wf, "generate_report", _mock_qwen_success()):
+        result = analyze_phishing(SAMPLE_EML, mode="hybrid")
+
+    assert result.report_source == "qwen"
+    assert result.llm_report_status == "completed"
+    assert result.llm_report_error_code is None
+    assert result.report.risk_seviyesi == result.final_decision.final_verdict
+
+
+def test_hybrid_mode_report_generation_error_falls_back_to_mechanical_report():
+    """generate_report() raising ReportGenerationError must never prevent
+    a report from being produced — the deterministic mechanical report
+    (the same builder fast mode always uses) substitutes, with no retry
+    and no attempt to repair the model's output (CLAUDE.md
+    "Yapılmayacaklar"). This is the fallback contract the user required:
+    report_source/llm_report_status record what happened instead of the
+    caller having to infer it from report content."""
+    finding = _finding(SemanticFindingType.URGENCY_OR_PRESSURE)
+    validation_result = ValidationResult(accepted=[finding], rejected=[])
+
+    with patch.object(wf, "analyze_semantic", return_value=validation_result), \
+         patch.object(
+             wf, "generate_report",
+             side_effect=ReportGenerationError(code="invalid_json", message="bad json"),
+         ):
+        result = analyze_phishing(SAMPLE_EML, mode="hybrid")
+
+    assert result.report_source == "mechanical"
+    assert result.llm_report_status == "failed_fallback"
+    assert result.llm_report_error_code == "invalid_json"
+    # The deterministic decision must still be reflected correctly even
+    # though the LLM report generator failed — the fallback report is
+    # built from the SAME final_decision, not the stale rule_verdict.
+    assert result.report.risk_seviyesi == result.final_decision.final_verdict
+
+
+def test_hybrid_mode_report_generation_error_code_is_preserved_for_each_failure_mode():
+    """Every ReportGenerationError code (model_call_failed, invalid_json,
+    schema_invalid, verdict_mismatch) must surface verbatim on
+    llm_report_error_code, not be collapsed to a generic flag — an
+    operator inspecting failures needs to tell them apart."""
+    for code in ("model_call_failed", "invalid_json", "schema_invalid", "verdict_mismatch"):
+        with patch.object(wf, "analyze_semantic", return_value=ValidationResult(accepted=[], rejected=[])), \
+             patch.object(
+                 wf, "generate_report",
+                 side_effect=ReportGenerationError(code=code, message="x"),
+             ):
+            result = analyze_phishing(SAMPLE_EML, mode="hybrid")
+
+        assert result.llm_report_status == "failed_fallback"
+        assert result.llm_report_error_code == code
+        assert result.report_source == "mechanical"
+
+
+def test_hybrid_mode_semantic_skipped_still_attempts_qwen_report():
+    """Even when semantic extraction is skipped (rule_verdict already
+    Phishing), generate_report() must still be attempted — the skip only
+    applies to the semantic extractor, not to report generation."""
+    mock_report = _mock_qwen_success()
+    with patch.object(wf, "analyze_semantic", MagicMock()), \
+         patch.object(wf, "generate_report", mock_report):
+        result = analyze_phishing(PHISHING_SAMPLE_EML, mode="hybrid")
+
+    assert mock_report.called
+    assert result.report_source == "qwen"
+    assert result.llm_report_status == "completed"
 
 
 if __name__ == "__main__":

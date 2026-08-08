@@ -29,9 +29,10 @@ MODE
         No model call, ~1 second.
     "hybrid": parse -> rule engine v1 -> RuleAssessment -> semantic
         extraction (Qwen3.5-9B, shadow-mode extractor validated against
-        the email body) -> decision policy -> mechanical report reflecting
-        the policy's FinalDecision. See HYBRID MODE below for the full
-        contract.
+        the email body) -> decision policy -> Qwen report generation
+        (src/report/generate.py), falling back to the mechanical report
+        on any failure. See HYBRID MODE and REPORT GENERATION below for
+        the full contract.
 
 HYBRID MODE
     The email is parsed exactly once — facts is reused for both the rule
@@ -89,6 +90,41 @@ HYBRID MODE
     module docstring for the invariant this preserves:
     report.risk_seviyesi == final_decision.final_verdict, always, in
     both modes.
+
+REPORT GENERATION (PHISHING_ROUTING_PLAN.md section 10.5, "Qwen çağrı 2")
+    Fast mode's report is always mechanical (src/report/mechanical.py) —
+    unchanged, no model call.
+
+    Hybrid mode, after decide() produces a FinalDecision, calls
+    src/report/generate.py's generate_report() to have Qwen write the
+    Turkish report. generate_report() never repairs or retries its own
+    output (same "çıktıyı onarma yasak" rule analyze_semantic() already
+    applies) — it either returns a valid, verdict-matching Report or
+    raises ReportGenerationError. This module is the one that decides
+    what happens next: on ReportGenerationError, the deterministic
+    mechanical report (already used by fast mode) is substituted, so a
+    broken model call NEVER prevents a report from being produced — it
+    only changes which report generator produced it.
+
+    report_source and llm_report_status record which happened, so a
+    caller/observer can tell "the model wrote this" from "the model was
+    asked but failed and this is the deterministic fallback" without
+    inspecting report content:
+
+        mode="fast"                          -> report_source="mechanical",
+                                                 llm_report_status="not_requested"
+        mode="hybrid", Qwen succeeds          -> report_source="qwen",
+                                                 llm_report_status="completed"
+        mode="hybrid", Qwen fails (any code)  -> report_source="mechanical",
+                                                 llm_report_status="failed_fallback",
+                                                 llm_report_error_code=<the
+                                                 ReportGenerationError's code>
+
+    generate_report() itself has no notion of "fallback" or a status
+    field — it only ever returns a successful Report or raises. Fallback
+    selection and status bookkeeping are entirely this module's
+    responsibility, matching generate_report()'s own module docstring
+    ("generate_report() NEVER RETURNS A FAILURE VALUE").
 """
 import sys
 from pathlib import Path
@@ -107,6 +143,7 @@ from schemas.semantic import ValidatedSemanticFinding  # noqa: E402
 from src.decision.context import build_context  # noqa: E402
 from src.decision.phishing_policy import decide  # noqa: E402
 from src.parser.parse import parse_eml  # noqa: E402
+from src.report.generate import ReportGenerationError, generate_report  # noqa: E402
 from src.report.mechanical import build_report  # noqa: E402
 from src.rules.adapters import from_v1  # noqa: E402
 from src.rules.engine import evaluate, load_rules  # noqa: E402
@@ -115,6 +152,8 @@ from src.semantic.validate import ValidatedFinding  # noqa: E402
 
 AnalysisMode = Literal["fast", "hybrid"]
 SemanticStatus = Literal["skipped", "failed", "completed"]
+ReportSource = Literal["mechanical", "qwen"]
+LLMReportStatus = Literal["not_requested", "completed", "failed_fallback"]
 
 SEMANTIC_SKIP_REASON_ALREADY_PHISHING = "rule_verdict_already_phishing"
 
@@ -140,6 +179,13 @@ class PhishingAnalysisResult(BaseModel):
     # even parse. Audit trail only, never policy input — see module
     # docstring's "completed" status.
     rejected_findings: list[ValidatedFinding] = Field(default_factory=list)
+    # Defaults match fast mode's only possible values, so existing
+    # callers (CLI/web, both still fast-only as of this turn) get these
+    # fields for free without constructing them explicitly — see module
+    # docstring's REPORT GENERATION table for the full mode/status matrix.
+    report_source: ReportSource = "mechanical"
+    llm_report_status: LLMReportStatus = "not_requested"
+    llm_report_error_code: str | None = None
 
 
 def analyze_phishing(email_input: Path, mode: AnalysisMode = "fast") -> PhishingAnalysisResult:
@@ -186,7 +232,26 @@ def analyze_phishing(email_input: Path, mode: AnalysisMode = "fast") -> Phishing
 
     context: PhishingDecisionContext = build_context(facts)
     final_decision = decide(rule_assessment, accepted_findings, context)
-    report = build_report(rule_assessment, decision=final_decision)
+
+    # generate_report() never repairs/retries its own output (see its
+    # module docstring) — a ReportGenerationError here means the model
+    # call or its output was unusable, not that no report can be
+    # produced at all. The deterministic mechanical report (the same
+    # builder fast mode always uses) substitutes in that case, so
+    # analyze_phishing() always returns a usable report either way; only
+    # report_source/llm_report_status say which generator actually wrote
+    # it.
+    try:
+        report = generate_report(facts, rule_assessment, final_decision, accepted_findings)
+    except ReportGenerationError as exc:
+        report = build_report(rule_assessment, decision=final_decision)
+        report_source: ReportSource = "mechanical"
+        llm_report_status: LLMReportStatus = "failed_fallback"
+        llm_report_error_code = exc.code
+    else:
+        report_source = "qwen"
+        llm_report_status = "completed"
+        llm_report_error_code = None
 
     return PhishingAnalysisResult(
         mode=mode,
@@ -198,4 +263,7 @@ def analyze_phishing(email_input: Path, mode: AnalysisMode = "fast") -> Phishing
         semantic_skip_reason=semantic_skip_reason,
         accepted_findings=accepted_findings,
         rejected_findings=rejected_findings,
+        report_source=report_source,
+        llm_report_status=llm_report_status,
+        llm_report_error_code=llm_report_error_code,
     )
