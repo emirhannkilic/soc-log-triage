@@ -194,7 +194,12 @@ yeniden kalibre etmek için ASLA** — aksi halde hat, ölçüldüğü sete uydu
 ### Kural motoru (asıl sınıflandırmayı yapan bileşen)
 
 Elle etiketlenmiş **80 maillik** bir hold-out setinde (15 phishing, 65
-legitimate), 22 ağırlıklı sinyal ve ≥5 / 3–4 / <3 eşikleriyle ölçüldü:
+legitimate), ölçüm anında aktif olan 22 ağırlıklı sinyal ve ≥5 / 3–4 / <3
+eşikleriyle ölçüldü. `config/rules.yaml` şu an **27** sinyal tanımlıyor — 5
+tanesi sonradan eklendi (magic-byte/MIME uyumsuzluğu, inline QR tespiti, ve
+iki scam-narrative dil kalıbı) ve aşağıdaki ölçümü değiştirmedi, çünkü bu
+hold-out setinde hiçbiri tetiklenmedi (sinyal bazlı detay için CLAUDE.md'nin
+kalibrasyon geçmişine bakın):
 
 | Metrik | Değer | Anlamı |
 |---|---|---|
@@ -356,7 +361,7 @@ scripts/
   smoke_test_hybrid.py            tek mail, gerçek model smoke test
 templates/
   report.html.j2          Jinja2 → HTML rapor
-tests/                    500+ birim testi, gerçek model çağrısı yok
+tests/                    447 birim testi, gerçek model çağrısı yok
 ```
 
 ---
@@ -511,12 +516,15 @@ değil — ağır swap'in göstergesi.
 - Ağırlıklar ve eşikler başlangıçta ilk 30 mail üzerinde kalibre edildi, o
   rakamlar kalibrasyon sonucu olmaya devam ediyor. Sonraki düzeltmeler ayrı
   bir dev sette ayarlandı (yukarıya bakın).
-- **Kural motoru tek başına zarfı okuyor, mektubu değil.** 22 sinyalinin
-  19'u header, URL ya da ek dosyaya bakıyor. Kimlik doğrulaması temiz, linki
-  ve eki olmayan bir mail, metni ne kadar açık şekilde dolandırıcı olursa
-  olsun `fast` modda motora görünmez. Bilinen iki kaçak tam olarak bu: gerçek
-  altyapıdan forward edilmiş, SPF/DKIM/DMARC hepsi pass Portekizce
-  hukuki-tehdit sosyal mühendisliği; ve gerçek bir `.edu.tr` hesabından
+- **Kural motoru tek başına zarfı okuyor, mektubu değil.** 27 sinyalinin
+  (`config/rules.yaml`) çoğu header, URL ya da ek dosyaya bakıyor; sadece
+  scam-narrative dil çifti ve QR/magic-byte kontrolleri içeriğe hiç dokunuyor,
+  ve hiçbiri semantic katmanın yaptığı gibi genel gövde metnini okumuyor.
+  Kimlik doğrulaması temiz, linki ve eki olmayan bir mail, metni ne kadar
+  açık şekilde dolandırıcı olursa olsun `fast` modda motora görünmez. Bilinen
+  iki kaçak tam olarak bu: gerçek altyapıdan forward edilmiş, SPF/DKIM/DMARC
+  hepsi pass Portekizce hukuki-tehdit sosyal mühendisliği; ve gerçek bir
+  `.edu.tr` hesabından
   gönderilmiş 419 avans-ücreti dolandırıcılığı. **`hybrid` mod tam olarak bu
   boşluğun bir kısmını kapatmak için var** — semantic katman kural motorunun
   göremediği gövde metnini okuyor — ama opt-in, M2 Air'de ~60–270 saniyeye

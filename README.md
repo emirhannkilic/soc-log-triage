@@ -195,7 +195,12 @@ against rather than to the general problem.
 ### Rule engine (the component that actually classifies)
 
 Measured on a hand-labelled hold-out set of **80 emails** (15 phishing, 65
-legitimate), with 22 weighted signals and thresholds at ≥5 / 3–4 / <3:
+legitimate), with the 22 weighted signals active at measurement time and
+thresholds at ≥5 / 3–4 / <3. `config/rules.yaml` currently defines **27**
+signals — 5 were added afterward (magic-byte/MIME mismatch, inline QR
+detection, and two scam-narrative language patterns) and did not change the
+measurement below, since none of them fired on this hold-out set (see
+CLAUDE.md's calibration history for the per-signal detail):
 
 | Metric | Value | Meaning |
 |---|---|---|
@@ -356,7 +361,7 @@ scripts/
   smoke_test_hybrid.py            single-email, real-model smoke test
 templates/
   report.html.j2          Jinja2 → HTML report
-tests/                    500+ unit tests, no real model calls
+tests/                    447 unit tests, no real model calls
 ```
 
 ---
@@ -510,15 +515,18 @@ it is a sign of heavy swapping.
 - Weights and thresholds were originally calibrated on the first 30 emails, so
   those remain calibration results. Later fixes were tuned on a separate dev
   set (see above).
-- **The rule engine alone reads the envelope, not the letter.** Nineteen of
-  its 22 signals look at headers, URLs or attachments. An email with clean
-  authentication, no links and no attachments is invisible to it in `fast`
-  mode however obviously fraudulent the text is. Two known misses are exactly
-  this: Portuguese legal-threat social engineering forwarded through genuine
-  infrastructure with SPF, DKIM and DMARC all passing, and a 419 advance-fee
-  scam sent from a real `.edu.tr` account. **`hybrid` mode exists specifically
-  to close part of this gap** — the semantic layer reads body text the rule
-  engine cannot — but it is opt-in, costs ~60–270 seconds on an M2 Air, and
+- **The rule engine alone reads the envelope, not the letter.** Most of its
+  27 signals (`config/rules.yaml`) look at headers, URLs or attachments; only
+  the scam-narrative language pair and the QR/magic-byte checks touch content
+  at all, and none of them read general body text the way the semantic layer
+  does. An email with clean authentication, no links and no attachments is
+  invisible to it in `fast` mode however obviously fraudulent the text is.
+  Two known misses are exactly this: Portuguese legal-threat social
+  engineering forwarded through genuine infrastructure with SPF, DKIM and
+  DMARC all passing, and a 419 advance-fee scam sent from a real `.edu.tr`
+  account. **`hybrid` mode exists specifically to close part of this gap** —
+  the semantic layer reads body text the rule engine cannot — but it is
+  opt-in, costs ~60–270 seconds on an M2 Air, and
   the 18-email observation above (1/18 upgrades, 0/18 wrong-direction) is too
   small a sample to bound how much of the gap it actually closes in general.
 - **The narrative sentence is not a claim to trust on its own.** It is not
