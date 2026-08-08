@@ -1,6 +1,11 @@
-"""Unit tests for src/report/prompts.py (PHISHING_ROUTING_PLAN.md section
-10.5, "Qwen çağrı 2" prompt construction). No model call anywhere in this
-file — build_messages()/build_user_prompt() are pure string builders."""
+"""Unit tests for src/report/narrative_prompts.py (PROGRESS.md "rapor
+mimarisi değişikliği" — narrative-only prompt construction). No model
+call anywhere in this file — build_messages()/build_user_prompt() are
+pure string builders. Adapted from tests/test_report_prompts.py (the
+module this replaces); the category-vocabulary tests
+(allowed_categories/extract_claimed_categories) have no counterpart
+here — narrative_prompts.py never asks the model to name a category at
+all, see that module's own module-docstring section on this."""
 import sys
 from pathlib import Path
 
@@ -14,7 +19,11 @@ from src.decision.phishing_policy import (  # noqa: E402
     DECISION_PATH_CREDENTIAL_REQUEST_URL_UPGRADE,
     DECISION_PATH_RULE_ENGINE_ONLY,
 )
-from src.report.prompts import build_messages, build_user_prompt  # noqa: E402
+from src.report.narrative_prompts import (  # noqa: E402
+    build_messages,
+    build_system_prompt,
+    build_user_prompt,
+)
 
 BASE_FACTS_KWARGS = dict(
     spf_result="pass",
@@ -112,10 +121,6 @@ def _finding(type_=SemanticFindingType.CREDENTIAL_REQUEST, evidence="şifrenizi 
 # --- authoritative verdict -------------------------------------------------
 
 def test_prompt_shows_final_verdict_not_rule_verdict():
-    """decision.final_verdict must be the only verdict shown to the
-    model — a semantic upgrade means rule_verdict is stale, and the
-    prompt must never let the model see (and possibly echo) the old
-    value."""
     assessment = _assessment(rule_verdict="Güvenilir")
     decision = _decision(
         final_verdict="Muhtemel Phishing",
@@ -142,15 +147,10 @@ def test_raw_decision_path_code_never_appears_in_prompt():
     prompt = build_user_prompt(facts(), assessment, decision, [finding])
 
     assert DECISION_PATH_CREDENTIAL_REQUEST_URL_UPGRADE not in prompt
-    # A plain-language explanation must be present instead.
     assert "kimlik bilgisi talebi" in prompt
 
 
 def test_raw_contributing_id_strings_never_appear_in_prompt():
-    """contributing_rule_ids/contributing_semantic_ids are internal
-    bookkeeping tokens ("<type>:<start>-<end>", signal names) — they
-    select which evidence/findings are shown, but must never be
-    interpolated into the prompt text themselves."""
     finding = _finding(evidence="şifrenizi doğrulayın", start=5, end=29)
     semantic_id = f"{finding.type.value}:{finding.start}-{finding.end}"
     assessment = _assessment(rule_verdict="Güvenilir")
@@ -162,7 +162,6 @@ def test_raw_contributing_id_strings_never_appear_in_prompt():
     prompt = build_user_prompt(facts(), assessment, decision, [finding])
 
     assert semantic_id not in prompt
-    # The finding's own evidence/explanation must still surface.
     assert finding.evidence in prompt
 
 
@@ -230,6 +229,28 @@ def test_url_block_lists_urls_by_name():
     assert "http://phishy.example/login" in prompt
 
 
+def test_url_block_strips_query_string_and_fragment():
+    url = UrlFacts(
+        url="http://phishy.example/login?email=victim@example.com&name=Jane+Doe#token=abc123",
+        href_domain="phishy.example",
+        anchor_text_domain="example.com",
+        text_href_mismatch=True,
+        is_ip_based=False,
+        is_shortener=False,
+        has_punycode=False,
+        redirect_param=False,
+    )
+    assessment = _assessment(rule_verdict="Phishing")
+    decision = _decision(final_verdict="Phishing", rule_verdict="Phishing")
+    prompt = build_user_prompt(facts(urls=[url]), assessment, decision, [])
+
+    assert "http://phishy.example/login" in prompt
+    assert "victim@example.com" not in prompt
+    assert "Jane+Doe" not in prompt
+    assert "abc123" not in prompt
+    assert "?" not in prompt.split("BAĞLANTILAR")[1].split("EKLER")[0]
+
+
 # --- messages structure -----------------------------------------------
 
 def test_build_messages_has_system_and_single_user_turn():
@@ -242,12 +263,86 @@ def test_build_messages_has_system_and_single_user_turn():
 
 
 def test_system_prompt_forbids_classification_language():
-    from src.report.prompts import SYSTEM_PROMPT
-    lowered = SYSTEM_PROMPT.lower()
-    assert "sınıflandırma" in lowered
-    # Turkish dotless-I lowercasing quirk: "YAPMIYORSUN".lower() ==
-    # "yapmiyorsun" (dotless i), not "yapmıyorsun" — check both forms.
-    assert "yapmıyorsun" in lowered or "yapmiyorsun" in lowered
+    # NOTE: Python's str.lower() is not Turkish-locale-aware — "DEĞİL".lower()
+    # produces "deği̇l" (combining-dot i), not "değil", so this checks the
+    # original-case text directly rather than risking a false negative.
+    prompt = build_system_prompt()
+    assert "sınıflandırma" in prompt.lower()
+    assert "DEĞİL" in prompt
+
+
+def test_system_prompt_contains_pii_prohibition():
+    prompt = build_system_prompt()
+    assert "KİŞİSEL VERİ YASAĞI" in prompt
+
+
+def test_system_prompt_forbids_soc_recommendation_and_category_fields():
+    """This is the structural replacement for the old module's category-
+    vocabulary tests: instead of narrowing WHICH category the model may
+    claim, this prompt tells the model it has no category/risk/SOC-
+    action field to fill at all."""
+    prompt = build_system_prompt()
+    assert "risk seviyesi" in prompt.lower() or "risk_seviyesi" not in prompt
+    assert "kategori adı" in prompt
+    assert "SOC" in prompt
+
+
+# --- PII: no raw body/subject anywhere in the prompt ------------------
+
+SENTINEL_NAME = "Ayşe Sahte Testkişi"
+SENTINEL_PHONE = "05551234567"
+SENTINEL_EMAIL = "ayse.testkisi@sentinel-example.invalid"
+SENTINEL_ADDRESS = "Sahte Mahallesi 42/7 Testkent"
+
+
+def test_body_text_never_appears_in_prompt():
+    f = facts(body_text=f"Sayın {SENTINEL_NAME}, telefon numaranız {SENTINEL_PHONE} "
+                         f"olarak kaydedildi. Adres: {SENTINEL_ADDRESS}.")
+    assessment = _assessment(rule_verdict="Güvenilir")
+    decision = _decision(final_verdict="Güvenilir")
+    prompt = build_user_prompt(f, assessment, decision, [])
+
+    assert SENTINEL_NAME not in prompt
+    assert SENTINEL_PHONE not in prompt
+    assert SENTINEL_ADDRESS not in prompt
+    assert "GÖVDE (ilk" not in prompt
+
+
+def test_subject_never_appears_in_prompt():
+    f = facts(subject=f"{SENTINEL_NAME} için önemli bildirim")
+    assessment = _assessment(rule_verdict="Güvenilir")
+    decision = _decision(final_verdict="Güvenilir")
+    prompt = build_user_prompt(f, assessment, decision, [])
+
+    assert SENTINEL_NAME not in prompt
+    assert "E-POSTA KONUSU" not in prompt
+
+
+def test_full_messages_never_leak_body_subject_or_url_query_pii():
+    url = UrlFacts(
+        url=f"http://example.com/track?email={SENTINEL_EMAIL}&name={SENTINEL_NAME}",
+        href_domain="example.com",
+        anchor_text_domain="example.com",
+        text_href_mismatch=False,
+        is_ip_based=False,
+        is_shortener=False,
+        has_punycode=False,
+        redirect_param=False,
+    )
+    f = facts(
+        body_text=f"{SENTINEL_NAME} - {SENTINEL_PHONE} - {SENTINEL_ADDRESS}",
+        subject=SENTINEL_NAME,
+        urls=[url],
+    )
+    assessment = _assessment(rule_verdict="Güvenilir")
+    decision = _decision(final_verdict="Güvenilir")
+    messages = build_messages(f, assessment, decision, [])
+    full_text = "\n".join(m["content"] for m in messages)
+
+    assert SENTINEL_NAME not in full_text
+    assert SENTINEL_PHONE not in full_text
+    assert SENTINEL_ADDRESS not in full_text
+    assert SENTINEL_EMAIL not in full_text
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
-"""Unit tests for src/report/generate.py (PHISHING_ROUTING_PLAN.md
-section 10.5, "Qwen çağrı 2"). No real model call anywhere in this file —
-generate_report() is exercised entirely with a QwenService whose
+"""Unit tests for src/report/narrative.py (PROGRESS.md "rapor mimarisi
+değişikliği"). No real model call anywhere in this file —
+generate_narrative() is exercised entirely with a QwenService whose
 load_fn/generate_fn are injected mocks, mirroring
-tests/test_semantic_analyze.py's _service_returning/_service_raising
-convention."""
+tests/test_report_generate.py's own convention for the module this
+replaces."""
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -15,7 +15,7 @@ from schemas.facts import EmailFacts  # noqa: E402
 from schemas.rule_assessment import RuleAssessment, RuleEvidence  # noqa: E402
 from src.decision.phishing_policy import DECISION_PATH_RULE_ENGINE_ONLY  # noqa: E402
 from src.llm.service import LLMServiceError, QwenService  # noqa: E402
-from src.report.generate import ReportGenerationError, generate_report  # noqa: E402
+from src.report.narrative import NarrativeGenerationError, generate_narrative  # noqa: E402
 
 BASE_FACTS_KWARGS = dict(
     spf_result="pass",
@@ -63,7 +63,7 @@ def facts(**overrides) -> EmailFacts:
     return EmailFacts(**kwargs)
 
 
-def assessment(rule_verdict="Güvenilir") -> RuleAssessment:
+def assessment(rule_verdict="Muhtemel Phishing") -> RuleAssessment:
     return RuleAssessment(
         engine_version="v1",
         rule_verdict=rule_verdict,
@@ -71,29 +71,26 @@ def assessment(rule_verdict="Güvenilir") -> RuleAssessment:
         total=None,
         families=[],
         critical_matches=[],
-        evidence=[RuleEvidence(signal="test_signal", description="test", weight=3.0)],
+        evidence=[RuleEvidence(signal="spf_or_dmarc_fail", description="test", weight=3.0)],
         decision_reasons=["test"],
     )
 
 
-def decision(final_verdict="Güvenilir", rule_verdict="Güvenilir") -> FinalDecision:
+def decision(final_verdict="Muhtemel Phishing", rule_verdict="Muhtemel Phishing") -> FinalDecision:
     return FinalDecision(
         rule_verdict=rule_verdict,
         final_verdict=final_verdict,
         decision_path=DECISION_PATH_RULE_ENGINE_ONLY,
-        contributing_rule_ids=["test_signal"],
+        contributing_rule_ids=["spf_or_dmarc_fail"],
         contributing_semantic_ids=[],
         analyst_review_required=final_verdict != "Güvenilir",
     )
 
 
-VALID_REPORT_JSON = """{
-  "risk_seviyesi": "Güvenilir",
-  "sonuc_ve_gerekce": "Bu karar; kimlik doğrulama uyumsuzluğu kategorisinin değerlendirilmesine dayanır.",
-  "genel_degerlendirme": "Olası senaryo: yok. Alıcıdan beklenen eylem: yok. Olası zarar: yok.",
-  "teknik_bulgular": [{"baslik": "test", "aciklama": "test aciklama"}],
-  "phishing_gostergeleri": [],
-  "onerilen_aksiyon": "Ek bir aksiyon gerekmiyor."
+VALID_NARRATIVE_JSON = """{
+  "olasi_senaryo": "Alıcı, bankasından geldiğini iddia eden bir e-posta alıyor.",
+  "mailin_talep_ettigi_eylem": "Alıcının bir bağlantıya tıklayıp giriş bilgilerini girmesi isteniyor.",
+  "olasi_zarar": "Girilen kimlik bilgileri saldırgan tarafından ele geçirilebilir."
 }"""
 
 
@@ -124,98 +121,79 @@ def _service_raising(exc: Exception) -> QwenService:
 
 # --- success path -----------------------------------------------------
 
-def test_generate_report_success_returns_matching_report():
-    service = _service_returning(VALID_REPORT_JSON)
-    report = generate_report(facts(), assessment(), decision(), [], service=service)
-    assert report.risk_seviyesi == "Güvenilir"
-    assert report.onerilen_aksiyon == "Ek bir aksiyon gerekmiyor."
+def test_generate_narrative_success_returns_matching_draft():
+    service = _service_returning(VALID_NARRATIVE_JSON)
+    draft = generate_narrative(facts(), assessment(), decision(), [], service=service)
+    assert draft.olasi_senaryo == "Alıcı, bankasından geldiğini iddia eden bir e-posta alıyor."
+    assert draft.olasi_zarar == "Girilen kimlik bilgileri saldırgan tarafından ele geçirilebilir."
 
 
-def test_generate_report_extracts_json_from_code_fence():
-    fenced = f"```json\n{VALID_REPORT_JSON}\n```"
+def test_generate_narrative_extracts_json_from_code_fence():
+    fenced = f"```json\n{VALID_NARRATIVE_JSON}\n```"
     service = _service_returning(fenced)
-    report = generate_report(facts(), assessment(), decision(), [], service=service)
-    assert report.risk_seviyesi == "Güvenilir"
+    draft = generate_narrative(facts(), assessment(), decision(), [], service=service)
+    assert draft.mailin_talep_ettigi_eylem
 
 
 # --- model_call_failed --------------------------------------------------
 
-def test_generate_report_wraps_llm_service_error_as_model_call_failed():
+def test_generate_narrative_wraps_llm_service_error_as_model_call_failed():
     service = _service_raising(LLMServiceError("GPU timeout"))
     try:
-        generate_report(facts(), assessment(), decision(), [], service=service)
-        raise AssertionError("expected ReportGenerationError")
-    except ReportGenerationError as e:
+        generate_narrative(facts(), assessment(), decision(), [], service=service)
+        raise AssertionError("expected NarrativeGenerationError")
+    except NarrativeGenerationError as e:
         assert e.code == "model_call_failed"
         assert e.__cause__ is not None
 
 
 # --- invalid_json --------------------------------------------------------
 
-def test_generate_report_raises_invalid_json_on_unparseable_output():
+def test_generate_narrative_raises_invalid_json_on_unparseable_output():
     service = _service_returning("this is not json at all")
     try:
-        generate_report(facts(), assessment(), decision(), [], service=service)
-        raise AssertionError("expected ReportGenerationError")
-    except ReportGenerationError as e:
+        generate_narrative(facts(), assessment(), decision(), [], service=service)
+        raise AssertionError("expected NarrativeGenerationError")
+    except NarrativeGenerationError as e:
         assert e.code == "invalid_json"
 
 
-def test_generate_report_raises_invalid_json_when_no_object_present():
-    """No '{...}' substring anywhere in the output — extraction must
-    fail cleanly, not raise or guess."""
-    service = _service_returning("I refuse to produce a report for this email.")
+def test_generate_narrative_raises_invalid_json_when_no_object_present():
+    service = _service_returning("I refuse to produce a narrative for this email.")
     try:
-        generate_report(facts(), assessment(), decision(), [], service=service)
-        raise AssertionError("expected ReportGenerationError")
-    except ReportGenerationError as e:
+        generate_narrative(facts(), assessment(), decision(), [], service=service)
+        raise AssertionError("expected NarrativeGenerationError")
+    except NarrativeGenerationError as e:
         assert e.code == "invalid_json"
 
 
 # --- schema_invalid --------------------------------------------------------
 
-def test_generate_report_raises_schema_invalid_on_missing_field():
-    incomplete = '{"risk_seviyesi": "Güvenilir"}'
+def test_generate_narrative_raises_schema_invalid_on_missing_field():
+    incomplete = '{"olasi_senaryo": "x"}'
     service = _service_returning(incomplete)
     try:
-        generate_report(facts(), assessment(), decision(), [], service=service)
-        raise AssertionError("expected ReportGenerationError")
-    except ReportGenerationError as e:
+        generate_narrative(facts(), assessment(), decision(), [], service=service)
+        raise AssertionError("expected NarrativeGenerationError")
+    except NarrativeGenerationError as e:
         assert e.code == "schema_invalid"
 
 
-def test_generate_report_raises_schema_invalid_on_extra_field():
+def test_generate_narrative_raises_schema_invalid_on_extra_field():
     import json
 
-    payload = json.loads(VALID_REPORT_JSON)
-    payload["unexpected_field"] = "x"
+    payload = json.loads(VALID_NARRATIVE_JSON)
+    payload["risk_seviyesi"] = "Phishing"
     service = _service_returning(json.dumps(payload))
     try:
-        generate_report(facts(), assessment(), decision(), [], service=service)
-        raise AssertionError("expected ReportGenerationError")
-    except ReportGenerationError as e:
+        generate_narrative(facts(), assessment(), decision(), [], service=service)
+        raise AssertionError("expected NarrativeGenerationError")
+    except NarrativeGenerationError as e:
         assert e.code == "schema_invalid"
 
 
-# --- verdict_mismatch — the "LLM does not classify" enforcement point -----
-
-def test_generate_report_raises_verdict_mismatch_when_model_echoes_wrong_verdict():
-    """The model wrote risk_seviyesi="Güvenilir" but decision.final_verdict
-    is "Phishing" — the model's own verdict must never be trusted over
-    the authoritative FinalDecision."""
-    service = _service_returning(VALID_REPORT_JSON)  # risk_seviyesi: Güvenilir
-    mismatched_decision = decision(final_verdict="Phishing", rule_verdict="Phishing")
-    try:
-        generate_report(facts(), assessment("Phishing"), mismatched_decision, [],
-                         service=service)
-        raise AssertionError("expected ReportGenerationError")
-    except ReportGenerationError as e:
-        assert e.code == "verdict_mismatch"
-
-
-def test_generate_report_never_retries_on_any_failure():
-    """No retry, no repair — a single generate() call, period. Verified
-    by counting calls on a service that always fails."""
+def test_generate_narrative_never_retries_on_any_failure():
+    """No retry, no repair — a single generate() call, period."""
     call_count = {"n": 0}
 
     def counting_raise(*a, **k):
@@ -228,8 +206,8 @@ def test_generate_report_never_retries_on_any_failure():
         generate_fn=counting_raise,
     )
     try:
-        generate_report(facts(), assessment(), decision(), [], service=service)
-    except ReportGenerationError:
+        generate_narrative(facts(), assessment(), decision(), [], service=service)
+    except NarrativeGenerationError:
         pass
     assert call_count["n"] == 1
 

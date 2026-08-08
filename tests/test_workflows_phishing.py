@@ -1,12 +1,13 @@
 """Unit tests for src/workflows/phishing.py (PHISHING_ROUTING_PLAN.md
-"hybrid workflow wiring" task, extended by the "final rapor prompt ve
-şemasını güncellemek" task). Covers both mode="fast" (unchanged) and
-mode="hybrid" (parse -> rule engine -> semantic extraction -> decision
-policy -> Qwen report generation, falling back to the mechanical report
-on failure). analyze_semantic() and generate_report() are mocked
-throughout — these are workflow-wiring tests, not a real Qwen3.5-9B
-smoke test (that already exists separately, see src/semantic/
-smoke_test.py and scripts/evaluate_semantic_extractor.py)."""
+"hybrid workflow wiring" task, extended by PROGRESS.md's "rapor mimarisi
+değişikliği"). Covers both mode="fast" (unchanged) and mode="hybrid"
+(parse -> rule engine -> semantic extraction -> decision policy ->
+mechanical report, ALWAYS -> optional Qwen narrative call that replaces
+only genel_degerlendirme's fallback text). analyze_semantic() and
+generate_narrative() are mocked throughout — these are workflow-wiring
+tests, not a real Qwen3.5-9B smoke test (that already exists separately,
+see src/semantic/smoke_test.py and scripts/evaluate_semantic_
+extractor.py)."""
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,8 +15,10 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import src.workflows.phishing as wf  # noqa: E402
+from schemas.decision import FinalDecision  # noqa: E402
 from schemas.semantic import SemanticFindingType, ValidatedSemanticFinding  # noqa: E402
-from src.report.generate import ReportGenerationError  # noqa: E402
+from src.decision.phishing_policy import DECISION_PATH_RULE_ENGINE_ONLY  # noqa: E402
+from src.report.narrative import NarrativeGenerationError  # noqa: E402
 from src.semantic.analyze import SemanticExtractionError  # noqa: E402
 from src.semantic.validate import (  # noqa: E402
     RejectionReason,
@@ -44,31 +47,27 @@ def _finding(type_, evidence="x" * 10, confidence=0.9) -> ValidatedSemanticFindi
     )
 
 
-def _qwen_report(verdict: str):
-    """A minimal, schema-valid Report generate_report() could plausibly
-    return for the given verdict — used to mock the Qwen success path
-    without a real model call."""
-    from schemas.report import Report
+def _narrative_draft():
+    """A minimal, schema-valid NarrativeDraft generate_narrative() could
+    plausibly return — used to mock the Qwen narrative success path
+    without a real model call. Unlike the removed generate_report()
+    mock, this has no verdict to echo — NarrativeDraft carries no
+    risk_seviyesi field at all."""
+    from schemas.narrative import NarrativeDraft
 
-    return Report(
-        risk_seviyesi=verdict,
-        sonuc_ve_gerekce="Bu karar; kimlik ve marka taklidi kategorisinin değerlendirilmesine dayanır.",
-        genel_degerlendirme="Olası senaryo: test. Alıcıdan beklenen eylem: test. Olası zarar: test.",
-        teknik_bulgular=[],
-        phishing_gostergeleri=[],
-        onerilen_aksiyon="Test.",
+    return NarrativeDraft(
+        olasi_senaryo="test senaryo.",
+        mailin_talep_ettigi_eylem="test eylem.",
+        olasi_zarar="test zarar.",
     )
 
 
 def _mock_qwen_success():
-    """generate_report() replacement that echoes decision.final_verdict —
+    """generate_narrative() replacement returning a fixed NarrativeDraft —
     used by tests that only care about final_decision/report_source
-    wiring, not the report TEXT (that's src/report/prompts.py's and
-    src/report/generate.py's own test files' job)."""
-    def fake_generate_report(facts, rule_assessment, decision, accepted_findings):
-        return _qwen_report(decision.final_verdict)
-
-    return MagicMock(side_effect=fake_generate_report)
+    wiring, not the narrative TEXT (that's src/report/narrative_prompts.py's
+    and src/report/narrative.py's own test files' job)."""
+    return MagicMock(return_value=_narrative_draft())
 
 
 def test_fast_mode_returns_result_with_matching_verdict():
@@ -85,10 +84,10 @@ def test_fast_mode_returns_result_with_matching_verdict():
     assert result.semantic_status is None
     assert result.accepted_findings == []
     assert result.rejected_findings == []
-    # fast mode never calls the LLM report generator either.
+    # fast mode never calls the Qwen narrative generator either.
     assert result.report_source == "mechanical"
-    assert result.llm_report_status == "not_requested"
-    assert result.llm_report_error_code is None
+    assert result.narrative_status == "not_requested"
+    assert result.narrative_error_code is None
 
 
 def test_fast_mode_defaults_when_mode_omitted():
@@ -113,7 +112,7 @@ def test_hybrid_mode_skips_semantic_call_when_already_phishing():
     documents for every layer of this system."""
     mock_analyze = MagicMock()
     with patch.object(wf, "analyze_semantic", mock_analyze), \
-         patch.object(wf, "generate_report", _mock_qwen_success()):
+         patch.object(wf, "generate_narrative", _mock_qwen_success()):
         result = analyze_phishing(PHISHING_SAMPLE_EML, mode="hybrid")
 
     assert result.rule_assessment.rule_verdict == "Phishing"
@@ -125,9 +124,10 @@ def test_hybrid_mode_skips_semantic_call_when_already_phishing():
     assert result.report.risk_seviyesi == "Phishing"
     assert result.accepted_findings == []
     assert result.rejected_findings == []
-    assert result.report_source == "qwen"
-    assert result.llm_report_status == "completed"
-    assert result.llm_report_error_code is None
+    # final_verdict == "Phishing" != "Güvenilir" -> narrative call attempted.
+    assert result.report_source == "mechanical_with_qwen_narrative"
+    assert result.narrative_status == "completed"
+    assert result.narrative_error_code is None
 
 
 # --- hybrid mode: semantic model failure never loses the deterministic verdict ---
@@ -140,10 +140,11 @@ def test_hybrid_mode_semantic_extraction_error_invalid_json_falls_back_to_rule_v
     bare `except Exception` (or, in an earlier version of this module, a
     bare `except SystemExit` — the wrong exception type entirely, see
     src/semantic/analyze.py's module docstring for why it was replaced)."""
+    mock_narrative = _mock_qwen_success()
     with patch.object(
         wf, "analyze_semantic",
         side_effect=SemanticExtractionError(code="invalid_json", message="bad json"),
-    ), patch.object(wf, "generate_report", _mock_qwen_success()):
+    ), patch.object(wf, "generate_narrative", mock_narrative):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.semantic_status == "failed"
@@ -153,6 +154,13 @@ def test_hybrid_mode_semantic_extraction_error_invalid_json_falls_back_to_rule_v
     assert result.report.risk_seviyesi == result.rule_assessment.rule_verdict
     assert result.accepted_findings == []
     assert result.rejected_findings == []
+    # SAMPLE_EML's rule_verdict is "Güvenilir" and nothing upgraded it —
+    # final_verdict == "Güvenilir" -> narrative is never even attempted,
+    # regardless of the semantic failure above.
+    assert result.final_decision.final_verdict == "Güvenilir"
+    assert not mock_narrative.called
+    assert result.report_source == "mechanical"
+    assert result.narrative_status == "not_requested"
 
 
 def test_hybrid_mode_semantic_extraction_error_model_call_failed_also_falls_back():
@@ -163,19 +171,24 @@ def test_hybrid_mode_semantic_extraction_error_model_call_failed_also_falls_back
     second (report) Qwen call at all. See the two dedicated tests below
     for that distinction; this test only covers the shared fallback
     behavior (final_decision/report still correct)."""
-    mock_report = MagicMock()
+    mock_narrative = MagicMock()
     with patch.object(
         wf, "analyze_semantic",
         side_effect=SemanticExtractionError(code="model_call_failed", message="GPU Timeout"),
-    ), patch.object(wf, "generate_report", mock_report):
+    ), patch.object(wf, "generate_narrative", mock_narrative):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.semantic_status == "failed"
     assert result.final_decision.final_verdict == result.rule_assessment.rule_verdict
     assert result.report.risk_seviyesi == result.rule_assessment.rule_verdict
     assert result.report_source == "mechanical"
-    assert result.llm_report_status == "failed_fallback"
-    assert result.llm_report_error_code == "model_call_failed"
+    # SAMPLE_EML's final_verdict is "Güvenilir" here too — narrative_status
+    # is "not_requested" (the Güvenilir skip), NOT "failed_fallback": the
+    # model_call_failed short-circuit is never even reached, since the
+    # Güvenilir check happens first. See the dedicated short-circuit test
+    # below (using PHISHING_SAMPLE_EML) for the actual short-circuit path.
+    assert result.narrative_status == "not_requested"
+    assert not mock_narrative.called
 
 
 # --- semantic_error_code decides whether the second Qwen call is attempted ---
@@ -184,41 +197,63 @@ def test_hybrid_mode_model_call_failed_skips_second_qwen_call_entirely():
     """The FIRST Qwen call (semantic extraction) failed with
     code="model_call_failed" — the underlying QwenService itself is
     broken (e.g. a GPU/Metal timeout), and per src/llm/service.py's "tek
-    model, iki çağrı" design the SECOND call (report generation) would
-    reuse the exact same lazily-loaded model instance within this same
-    request. Retrying it would just reproduce the same infrastructure
-    failure a few seconds later, so generate_report() must never even be
-    called — this is the fast-fail this task added, not merely "falls
-    back eventually"."""
-    mock_report = MagicMock()
+    model, iki çağrı" design the SECOND call (narrative generation)
+    would reuse the exact same lazily-loaded model instance within this
+    same request. Retrying it would just reproduce the same
+    infrastructure failure a few seconds later, so generate_narrative()
+    must never even be called — this is the fast-fail this task added,
+    not merely "falls back eventually".
+
+    decide() is patched to force final_verdict="Muhtemel Phishing" so
+    this test exercises the short-circuit itself, independent of
+    whether SAMPLE_EML's own signals happen to upgrade the verdict —
+    the model_call_failed short-circuit and the "Güvenilir" skip are two
+    DIFFERENT reasons narrative_status can end up "not_requested"-shaped,
+    and this test must isolate the former."""
+    mock_narrative = MagicMock()
+    forced_decision = FinalDecision(
+        rule_verdict="Güvenilir", final_verdict="Muhtemel Phishing",
+        decision_path=DECISION_PATH_RULE_ENGINE_ONLY,
+        contributing_rule_ids=[], contributing_semantic_ids=[],
+        analyst_review_required=True,
+    )
     with patch.object(
         wf, "analyze_semantic",
         side_effect=SemanticExtractionError(code="model_call_failed", message="GPU Timeout"),
-    ), patch.object(wf, "generate_report", mock_report):
+    ), patch.object(wf, "decide", return_value=forced_decision), \
+         patch.object(wf, "generate_narrative", mock_narrative):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
-    assert not mock_report.called
+    assert not mock_narrative.called
     assert result.report_source == "mechanical"
-    assert result.llm_report_status == "failed_fallback"
-    assert result.llm_report_error_code == "model_call_failed"
+    assert result.narrative_status == "failed_fallback"
+    assert result.narrative_error_code == "model_call_failed"
 
 
 def test_hybrid_mode_invalid_json_still_attempts_second_qwen_call():
     """The FIRST Qwen call failed with code="invalid_json" — the model
     itself responded (just with unparseable output), so the underlying
     infrastructure is known-good. Unlike "model_call_failed", this must
-    NOT short-circuit: generate_report() (the second, independent Qwen
-    call) is still attempted normally."""
-    mock_report = _mock_qwen_success()
+    NOT short-circuit: generate_narrative() (the second, independent
+    Qwen call) is still attempted normally. Same forced-decision
+    rationale as the short-circuit test above."""
+    mock_narrative = _mock_qwen_success()
+    forced_decision = FinalDecision(
+        rule_verdict="Güvenilir", final_verdict="Muhtemel Phishing",
+        decision_path=DECISION_PATH_RULE_ENGINE_ONLY,
+        contributing_rule_ids=[], contributing_semantic_ids=[],
+        analyst_review_required=True,
+    )
     with patch.object(
         wf, "analyze_semantic",
         side_effect=SemanticExtractionError(code="invalid_json", message="bad json"),
-    ), patch.object(wf, "generate_report", mock_report):
+    ), patch.object(wf, "decide", return_value=forced_decision), \
+         patch.object(wf, "generate_narrative", mock_narrative):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
-    assert mock_report.called
-    assert result.report_source == "qwen"
-    assert result.llm_report_status == "completed"
+    assert mock_narrative.called
+    assert result.report_source == "mechanical_with_qwen_narrative"
+    assert result.narrative_status == "completed"
 
 
 def test_hybrid_mode_unexpected_exception_is_not_swallowed():
@@ -241,7 +276,7 @@ def test_hybrid_mode_completed_credential_request_upgrades_with_url():
     validation_result = ValidationResult(accepted=[finding], rejected=[])
 
     with patch.object(wf, "analyze_semantic", return_value=validation_result), \
-         patch.object(wf, "generate_report", _mock_qwen_success()):
+         patch.object(wf, "generate_narrative", _mock_qwen_success()):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.semantic_status == "completed"
@@ -256,8 +291,9 @@ def test_hybrid_mode_completed_credential_request_upgrades_with_url():
     assert result.report.risk_seviyesi == result.final_decision.final_verdict
     assert result.report.risk_seviyesi == "Muhtemel Phishing"
     assert result.accepted_findings == [finding]
-    assert result.report_source == "qwen"
-    assert result.llm_report_status == "completed"
+    # final_verdict == "Muhtemel Phishing" != "Güvenilir" -> narrative attempted.
+    assert result.report_source == "mechanical_with_qwen_narrative"
+    assert result.narrative_status == "completed"
 
 
 def test_hybrid_mode_completed_no_upgrade_condition_keeps_rule_verdict():
@@ -266,14 +302,19 @@ def test_hybrid_mode_completed_no_upgrade_condition_keeps_rule_verdict():
     why (legitimate marketing mail routinely uses this language)."""
     finding = _finding(SemanticFindingType.URGENCY_OR_PRESSURE)
     validation_result = ValidationResult(accepted=[finding], rejected=[])
+    mock_narrative = _mock_qwen_success()
 
     with patch.object(wf, "analyze_semantic", return_value=validation_result), \
-         patch.object(wf, "generate_report", _mock_qwen_success()):
+         patch.object(wf, "generate_narrative", mock_narrative):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.final_decision.final_verdict == "Güvenilir"
     assert result.final_decision.decision_path == "rule_engine_only"
     assert result.report.risk_seviyesi == "Güvenilir"
+    # final_verdict == "Güvenilir" -> narrative never attempted.
+    assert not mock_narrative.called
+    assert result.report_source == "mechanical"
+    assert result.narrative_status == "not_requested"
 
 
 def test_hybrid_mode_rejected_findings_are_carried_but_not_used_by_policy():
@@ -288,7 +329,7 @@ def test_hybrid_mode_rejected_findings_are_carried_but_not_used_by_policy():
     validation_result = ValidationResult(accepted=[], rejected=[rejected])
 
     with patch.object(wf, "analyze_semantic", return_value=validation_result), \
-         patch.object(wf, "generate_report", _mock_qwen_success()):
+         patch.object(wf, "generate_narrative", _mock_qwen_success()):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.semantic_status == "completed"
@@ -313,7 +354,7 @@ def test_hybrid_mode_parses_email_exactly_once():
         call_count["n"] += 1
         return real_parse_eml(path)
 
-    with patch.object(wf, "generate_report", _mock_qwen_success()), \
+    with patch.object(wf, "generate_narrative", _mock_qwen_success()), \
          patch.object(wf, "parse_eml", side_effect=counting_parse_eml), \
          patch.object(wf, "analyze_semantic", return_value=validation_result):
         analyze_phishing(SAMPLE_EML, mode="hybrid")
@@ -321,79 +362,106 @@ def test_hybrid_mode_parses_email_exactly_once():
     assert call_count["n"] == 1
 
 
-# --- hybrid mode: report generation, Qwen success vs. fallback ---
+# --- hybrid mode: narrative generation, Qwen success vs. fallback ---
 
-def test_hybrid_mode_qwen_report_success_sets_source_and_status():
-    finding = _finding(SemanticFindingType.URGENCY_OR_PRESSURE)
+def test_hybrid_mode_qwen_narrative_success_sets_source_and_status():
+    # CREDENTIAL_REQUEST (unlike URGENCY_OR_PRESSURE) upgrades SAMPLE_EML's
+    # verdict past "Güvenilir" — see test_hybrid_mode_completed_credential_
+    # request_upgrades_with_url above — needed so this test's final_verdict
+    # actually reaches the narrative call rather than being skipped.
+    finding = _finding(SemanticFindingType.CREDENTIAL_REQUEST)
     validation_result = ValidationResult(accepted=[finding], rejected=[])
 
     with patch.object(wf, "analyze_semantic", return_value=validation_result), \
-         patch.object(wf, "generate_report", _mock_qwen_success()):
+         patch.object(wf, "generate_narrative", _mock_qwen_success()):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
-    assert result.report_source == "qwen"
-    assert result.llm_report_status == "completed"
-    assert result.llm_report_error_code is None
+    assert result.report_source == "mechanical_with_qwen_narrative"
+    assert result.narrative_status == "completed"
+    assert result.narrative_error_code is None
     assert result.report.risk_seviyesi == result.final_decision.final_verdict
 
 
-def test_hybrid_mode_report_generation_error_falls_back_to_mechanical_report():
-    """generate_report() raising ReportGenerationError must never prevent
-    a report from being produced — the deterministic mechanical report
-    (the same builder fast mode always uses) substitutes, with no retry
-    and no attempt to repair the model's output (CLAUDE.md
-    "Yapılmayacaklar"). This is the fallback contract the user required:
-    report_source/llm_report_status record what happened instead of the
-    caller having to infer it from report content."""
-    finding = _finding(SemanticFindingType.URGENCY_OR_PRESSURE)
+def test_hybrid_mode_narrative_generation_error_keeps_mechanical_fallback_text():
+    """generate_narrative() raising NarrativeGenerationError must never
+    prevent a report from being produced — report already carries
+    build_report()'s own mechanical genel_degerlendirme fallback text,
+    with no retry and no attempt to repair the model's output (CLAUDE.md
+    "Yapılmayacaklar"). This is the fallback contract: report_source/
+    narrative_status record what happened instead of the caller having
+    to infer it from report content."""
+    finding = _finding(SemanticFindingType.CREDENTIAL_REQUEST)
     validation_result = ValidationResult(accepted=[finding], rejected=[])
 
     with patch.object(wf, "analyze_semantic", return_value=validation_result), \
          patch.object(
-             wf, "generate_report",
-             side_effect=ReportGenerationError(code="invalid_json", message="bad json"),
+             wf, "generate_narrative",
+             side_effect=NarrativeGenerationError(code="invalid_json", message="bad json"),
          ):
         result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
     assert result.report_source == "mechanical"
-    assert result.llm_report_status == "failed_fallback"
-    assert result.llm_report_error_code == "invalid_json"
+    assert result.narrative_status == "failed_fallback"
+    assert result.narrative_error_code == "invalid_json"
     # The deterministic decision must still be reflected correctly even
-    # though the LLM report generator failed — the fallback report is
-    # built from the SAME final_decision, not the stale rule_verdict.
+    # though the Qwen narrative generator failed — the report (mechanical
+    # from the start) was already built from the SAME final_decision, not
+    # the stale rule_verdict.
     assert result.report.risk_seviyesi == result.final_decision.final_verdict
 
 
-def test_hybrid_mode_report_generation_error_code_is_preserved_for_each_failure_mode():
-    """Every ReportGenerationError code (model_call_failed, invalid_json,
-    schema_invalid, verdict_mismatch) must surface verbatim on
-    llm_report_error_code, not be collapsed to a generic flag — an
+def test_hybrid_mode_narrative_generation_error_code_is_preserved_for_each_failure_mode():
+    """Every NarrativeGenerationError code (model_call_failed,
+    invalid_json, schema_invalid) must surface verbatim on
+    narrative_error_code, not be collapsed to a generic flag — an
     operator inspecting failures needs to tell them apart."""
-    for code in ("model_call_failed", "invalid_json", "schema_invalid", "verdict_mismatch"):
-        with patch.object(wf, "analyze_semantic", return_value=ValidationResult(accepted=[], rejected=[])), \
-             patch.object(
-                 wf, "generate_report",
-                 side_effect=ReportGenerationError(code=code, message="x"),
-             ):
+    finding = _finding(SemanticFindingType.CREDENTIAL_REQUEST)
+    for code in ("model_call_failed", "invalid_json", "schema_invalid"):
+        with patch.object(
+            wf, "analyze_semantic",
+            return_value=ValidationResult(accepted=[finding], rejected=[]),
+        ), patch.object(
+            wf, "generate_narrative",
+            side_effect=NarrativeGenerationError(code=code, message="x"),
+        ):
             result = analyze_phishing(SAMPLE_EML, mode="hybrid")
 
-        assert result.llm_report_status == "failed_fallback"
-        assert result.llm_report_error_code == code
+        assert result.narrative_status == "failed_fallback"
+        assert result.narrative_error_code == code
         assert result.report_source == "mechanical"
 
 
-def test_hybrid_mode_semantic_skipped_still_attempts_qwen_report():
+def test_hybrid_mode_semantic_skipped_still_attempts_qwen_narrative():
     """Even when semantic extraction is skipped (rule_verdict already
-    Phishing), generate_report() must still be attempted — the skip only
-    applies to the semantic extractor, not to report generation."""
-    mock_report = _mock_qwen_success()
+    Phishing), generate_narrative() must still be attempted — the skip
+    only applies to the semantic extractor, not to narrative
+    generation."""
+    mock_narrative = _mock_qwen_success()
     with patch.object(wf, "analyze_semantic", MagicMock()), \
-         patch.object(wf, "generate_report", mock_report):
+         patch.object(wf, "generate_narrative", mock_narrative):
         result = analyze_phishing(PHISHING_SAMPLE_EML, mode="hybrid")
 
-    assert mock_report.called
-    assert result.report_source == "qwen"
-    assert result.llm_report_status == "completed"
+    assert mock_narrative.called
+    assert result.report_source == "mechanical_with_qwen_narrative"
+    assert result.narrative_status == "completed"
+
+
+def test_hybrid_mode_guvenilir_verdict_never_calls_narrative():
+    """The structural skip this rearchitecture added: final_verdict ==
+    'Güvenilir' means generate_narrative() is never even called,
+    regardless of semantic_status — see src/workflows/phishing.py's own
+    inline comment for the measured reliability rationale (69% of
+    Güvenilir candidates were rejected by the removed category-
+    vocabulary check in development-set measurement)."""
+    mock_narrative = MagicMock()
+    with patch.object(wf, "generate_narrative", mock_narrative):
+        result = analyze_phishing(SAMPLE_EML, mode="hybrid")
+
+    assert result.final_decision.final_verdict == "Güvenilir"
+    assert not mock_narrative.called
+    assert result.report_source == "mechanical"
+    assert result.narrative_status == "not_requested"
+    assert result.narrative_error_code is None
 
 
 if __name__ == "__main__":
