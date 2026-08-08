@@ -291,6 +291,12 @@ rule engine and template as the CLI.
 
 ### Routing
 
+The router returns four machine-readable outcomes: `phishing_direct`,
+`phishing_missing_email`, `needs_clarification`, and `unsupported`. A valid
+`.eml`/raw message bypasses the intent model. An authenticated upstream may
+provide `trusted_route_hint="phishing"`; this metadata must not be inferred
+from end-user prose.
+
 ```bash
 python3 src/router.py mail.eml              # can the pipeline take this?
 python3 src/router.py --text "$(pbpaste)"   # pasted email

@@ -294,6 +294,12 @@ motoru ve template'i çağırıyor.
 
 ### Yönlendirme
 
+Router dört makine-okunur sonuç üretir: `phishing_direct`,
+`phishing_missing_email`, `needs_clarification` ve `unsupported`. Geçerli
+`.eml`/ham mail intent modelini atlayarak doğrudan hatta girer. Güvenilir bir
+upstream servis `trusted_route_hint="phishing"` verebilir; bu metadata son
+kullanıcının serbest metninden türetilmemelidir.
+
 ```bash
 python3 src/router.py mail.eml              # hat bunu alabilir mi?
 python3 src/router.py --text "$(pbpaste)"   # yapıştırılmış mail
