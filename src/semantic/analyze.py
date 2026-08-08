@@ -188,13 +188,27 @@ bir fonun sana ait olduğunu iddia etmek). BU DEĞİLDİR (üç ayrı durum, \
   (taklit ETMİYORSA) bu bulgu DEĞİLDİR — sahte bir otorite iddiası + bir \
   işlem/tehdit/fon vaadi BİRLİKTE ARANIR, salt bir imza/künye/yasal \
   metin ARANMAZ.
-- "attachment_or_link_instruction": alıcıyı ZARARLI/ŞÜPHELİ bir eyleme \
-(kimlik bilgisi girme, ek açma, "hesabını doğrula" gibi bir sayfaya \
-tıklama) yönlendiren AÇIK bir talimat. BU DEĞİLDİR: gövdedeki her URL \
-ya da her "tıkla" ifadesi — bir haber/ürün linki, bir "detaylar için \
-tıklayın" pazarlama linki, ya da bir takip/tracking linki TEK BAŞINA \
-bulgu SAYILMAZ. Sadece linkin/ekin AÇIKÇA bir güvenlik eylemi (doğrulama, \
-giriş, ek açma) istediği durumlarda bu tipi kullan.
+- "credential_request": alıcıdan parola, kullanıcı adı+parola, OTP/SMS \
+doğrulama kodu, PIN, recovery phrase/seed veya benzeri GİZLİ bir kimlik \
+doğrulama bilgisini GİRMESİNİ, PAYLAŞMASINI ya da DOĞRULAMASINI AÇIKÇA \
+isteyen ifade. POZİTİF ÖRNEKLER: "kullanıcı adınızı ve parolanızı forma \
+girin", "SMS doğrulama kodunu yanıtlayın", "recovery phrase'inizi \
+doğrulayın", "şifrenizi güncelleyin". BU DEĞİLDİR (NEGATİF ÖRNEKLER): \
+"şifreniz başarıyla güncellendi" (geçmiş zaman, bir talep değil bir \
+bildirim), "hesabınıza yeni bir giriş yapıldı" (bir olay bildirimi, \
+alıcıdan bir şey istenmiyor), "hesabınızı kontrol edin" (genel bir \
+davet, spesifik bir kimlik doğrulama bilgisi istemiyor).
+- "attachment_or_link_instruction": bu tip SADECE EYLEM KANALINI \
+tanımlar — bir BAĞLANTIYA TIKLAMA, bir SAYFA AÇMA ya da bir EK ÇALIŞTIRMA \
+talimatı. Kimlik bilgisinin KENDİSİNİ istemek bu tipin YERİNE GEÇMEZ — \
+bir cümle hem "bir linke tıkla" HEM "o linkte parolanı gir" diyorsa bu \
+İKİ AYRI bulgudur (aşağıdaki ÇOKLU ETİKET KURALI'na bak), sadece \
+attachment_or_link_instruction ÜRETİP credential_request'i ATLAMA. BU \
+DEĞİLDİR: gövdedeki her URL ya da her "tıkla" ifadesi — bir haber/ürün \
+linki, bir "detaylar için tıklayın" pazarlama linki, ya da bir takip/ \
+tracking linki TEK BAŞINA bulgu SAYILMAZ. Sadece linkin/ekin AÇIKÇA bir \
+güvenlik eylemi (doğrulama, giriş, ek açma) istediği durumlarda bu tipi \
+kullan.
 - "threat_or_fear": alıcıda KAYIP/ZARAR/SORUN korkusu yaratan bir ifade \
 — "hesabınıza yetkisiz erişim tespit edildi", "hesabınız askıya \
 alınacak", "işleminiz iptal edilecek", "bu fırsatı kaybedeceksiniz" \
@@ -205,6 +219,14 @@ geçmesi YETERLİ DEĞİL, gerçek bir tehdit/kayıp anlatısı GEREKİR.
 sınırı, kıtlık ya da aciliyet ifadesi — "24 saat içinde", "5 iş günü \
 içinde", "son gün", "stoklar tükenmeden", "hemen". Bu tip GÖVDE'de \
 GEÇEN sayı/süre/aciliyet kelimesini alıntıla, kendi yorumunu ekleme.
+
+ÇOKLU ETİKET KURALI: bir ifade BİRDEN FAZLA tipi GERÇEKTEN karşılıyorsa \
+HER TİP İÇİN AYRI bir bulgu üret — tek bir cümleye tek bir tip seçmek \
+ZORUNDA DEĞİLSİN. Örnek: "Bağlantıya tıklayıp kullanıcı adınızı ve \
+parolanızı girin" hem attachment_or_link_instruction (bağlantıya tıklama \
+talimatı) HEM credential_request (parola talebi) olarak İKİ AYRI bulgu \
+üretmelidir — aynı "evidence" alıntısı farklı "type" değerleriyle birden \
+fazla kez KULLANILABİLİR, bu bir tekrar/duplicate SAYILMAZ.
 
 4. SADECE GÖVDE metninde GERÇEKTEN geçen ifadeler için bulgu üret. Konu \
 satırından, header'lardan ya da kendi tahmininden bulgu UYDURMA.

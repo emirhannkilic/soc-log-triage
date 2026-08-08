@@ -201,6 +201,89 @@ def test_system_prompt_requires_exact_line_break_preservation():
     assert "birleştirme" in lowered or "temizlemeye" in lowered
 
 
+# --- credential_request taxonomy fix (2026-08-08) ----------------------
+#
+# Regression suite for a real, repeated failure: five separate
+# scripts/smoke_test_hybrid.py runs against tests/fixtures/
+# hybrid_credential_upgrade.eml all produced attachment_or_link_
+# instruction instead of credential_request for a sentence explicitly
+# asking the reader to enter their username and password — the
+# decision policy's upgrade rule (src/decision/phishing_policy.py)
+# only reacts to CREDENTIAL_REQUEST, so this consistently blocked the
+# Güvenilir -> Muhtemel Phishing upgrade path from ever being observed.
+# Root cause (not model caprice): the OLD prompt defined
+# attachment_or_link_instruction with "kimlik bilgisi girme" explicitly
+# inside its own definition, and never defined credential_request at
+# all despite it being in the allowed-type enum — the model had
+# nowhere else to route a credential-entry request, and correctly went
+# with the only definition that covered it.
+
+def test_system_prompt_defines_credential_request_with_positive_and_negative_examples():
+    """credential_request is in the ALLOWED enum (see
+    test_system_prompt_lists_all_nine_allowed_types) but the prompt
+    used to never define what it means — this is the taxonomy gap the
+    five failed smoke-test runs traced back to. The definition must
+    give both a positive example (something to pattern-match toward)
+    and a negative example (a past-tense notification, which is NOT a
+    request) so the model can distinguish "asking for a credential"
+    from "reporting that one already changed"."""
+    from src.semantic.analyze import SYSTEM_PROMPT
+    assert '"credential_request":' in SYSTEM_PROMPT
+    lowered = SYSTEM_PROMPT.lower()
+    # Positive: a concrete verb+target example the model can match against.
+    assert "parolanızı forma girin" in lowered or "doğrulama kodunu" in lowered
+    # Negative: a past-tense notification must be explicitly ruled out —
+    # otherwise "şifreniz güncellendi" (a notification) risks being
+    # read as a request just because it mentions the same target word.
+    assert "başarıyla güncellendi" in lowered or "geçmiş zaman" in lowered
+
+
+def test_system_prompt_narrows_attachment_or_link_instruction_to_action_channel_only():
+    """attachment_or_link_instruction's definition must no longer claim
+    "kimlik bilgisi girme" as part of ITS OWN scope — that phrase used
+    to sit inside this type's own definition, giving the model no
+    reason to ever reach for credential_request instead. The type must
+    now be scoped to the action channel (click/open/run) with an
+    explicit statement that requesting the credential itself does NOT
+    substitute for a separate credential_request finding.
+
+    Uses the ORIGINAL (non-lowered) SYSTEM_PROMPT for these checks —
+    Python's str.lower() turns Turkish "İ" into a combining "i̇"
+    (two code points), which breaks a plain substring search against
+    an ASCII "i" the way test_system_prompt_forbids_classification_
+    language already had to work around elsewhere. Searching the
+    original text avoids the whole class of dotless-I mismatches."""
+    from src.semantic.analyze import SYSTEM_PROMPT
+    assert "EYLEM KANALINI" in SYSTEM_PROMPT
+    assert "YERİNE GEÇMEZ" in SYSTEM_PROMPT
+
+
+def test_system_prompt_states_multi_label_rule_for_same_evidence():
+    """The model must be told explicitly that a single sentence
+    satisfying two types should produce TWO findings (one per type),
+    and that reusing the same evidence quote across types is not a
+    duplicate — src/semantic/validate.py's seen-key is (type, evidence),
+    so two findings with the same evidence but different types were
+    always structurally allowed; the prompt just never told the model
+    this was expected, and it defaulted to picking one type."""
+    from src.semantic.analyze import SYSTEM_PROMPT
+    assert "ÇOKLU ETİKET KURALI" in SYSTEM_PROMPT
+    assert "tekrar/duplicate" in SYSTEM_PROMPT
+
+
+def test_system_prompt_multi_label_example_names_both_relevant_types():
+    """The multi-label rule's own worked example must name BOTH
+    attachment_or_link_instruction and credential_request together —
+    a rule stated only in the abstract ("multiple types can apply") is
+    exactly the kind of guidance the taxonomy gap already showed the
+    model doesn't reliably generalize from; a concrete example anchors
+    it to the actual failure mode being fixed."""
+    from src.semantic.analyze import SYSTEM_PROMPT
+    example_section = SYSTEM_PROMPT[SYSTEM_PROMPT.index("ÇOKLU ETİKET KURALI"):]
+    assert "attachment_or_link_instruction" in example_section
+    assert "credential_request" in example_section
+
+
 # --- JSON array extraction --------------------------------------------
 
 def test_extract_json_array_plain():
